@@ -5,166 +5,184 @@ from scipy.optimize import curve_fit
 import plotly.graph_objects as go
 
 # --- CẤU HÌNH TRANG ---
-st.set_page_config(page_title="Roche Immunoassay Calibrator", layout="wide")
+st.set_page_config(page_title="Universal Calibrator", layout="wide")
+st.title("🧪 Universal Lab Calibration Tool")
+st.markdown("Công cụ dựng đường chuẩn cho cả **Sinh hóa (Linear)** và **Miễn dịch (4PL/Rodbard)**.")
 
-st.title("🧬 Roche Immunoassay Calibration Simulator")
-st.markdown("Mô phỏng dựng đường cong chuẩn (4-Parameter Logistic) và tính toán ngược nồng độ.")
+# --- 1. ĐỊNH NGHĨA CÁC HÀM TOÁN HỌC ---
 
-# --- 1. ĐỊNH NGHĨA HÀM TOÁN HỌC ---
-def logistic_4pl(x, A, B, C, D):
+# --- A. Mô hình 4PL (Miễn dịch / Sinh hóa Protein) ---
+def func_4pl(x, A, B, C, D):
     return D + (A - D) / (1.0 + (x / C) ** B)
 
-def inverse_logistic_4pl(y, A, B, C, D):
+def inv_func_4pl(y, A, B, C, D):
     try:
         if (A - D) == 0 or (y - D) == 0: return np.nan
         term = (A - D) / (y - D) - 1
         if term <= 0: return np.nan
         return C * (term ** (1/B))
-    except:
-        return np.nan
+    except: return np.nan
 
-# --- 2. SIDEBAR & NHẬP LIỆU ---
+# --- B. Mô hình Linear (Sinh hóa thường: Glu, Ure...) ---
+def func_linear(x, slope, intercept):
+    return slope * x + intercept
+
+def inv_func_linear(y, slope, intercept):
+    if slope == 0: return np.nan
+    return (y - intercept) / slope
+
+# --- 2. GIAO DIỆN & SIDEBAR ---
 with st.sidebar:
-    st.header("1. Nhập Dữ liệu Cal")
-    st.info("Nhập các điểm chuẩn (Calibrators) vào bảng dưới đây. Bạn có thể thêm/sửa hàng.")
+    st.header("⚙️ Cấu hình")
+    
+    # CHỌN MÔ HÌNH
+    cal_model = st.selectbox(
+        "Chọn Mô hình Cal:",
+        ("Linear (Tuyến tính)", "Rodbard (4PL)")
+    )
+    
+    st.info("""
+    * **Linear:** Glucose, Ure, Cre, AST, ALT...
+    * **Rodbard (4PL):** TSH, Ferritin, Troponin, CRP, HbA1c...
+    """)
 
-    # Dữ liệu mẫu khởi tạo
-    default_data = pd.DataFrame({
-        "Result (Nồng độ)": [0.0, 0.5, 2.0, 10.0, 50.0, 100.0],
-        "Signal (RLU/Abs)": [500, 1200, 4500, 25000, 110000, 200000]
-    })
+    st.divider()
+    st.header("📝 Dữ liệu Cal")
 
-    # Widget nhập liệu dạng bảng
+    # Dữ liệu mẫu thay đổi theo mô hình
+    if cal_model == "Linear (Tuyến tính)":
+        default_data = pd.DataFrame({
+            "Result (Nồng độ)": [0.0, 100.0], # Thường chỉ cần 2 điểm (Blank + Standard)
+            "Signal (Abs/OD)": [0.005, 1.250]
+        })
+    else:
+        default_data = pd.DataFrame({
+            "Result (Nồng độ)": [0.0, 0.5, 5.0, 50.0, 100.0],
+            "Signal (RLU)": [400, 1000, 8000, 120000, 210000]
+        })
+
     df_input = st.data_editor(default_data, num_rows="dynamic", hide_index=True)
-
-    # Nút action
+    
     run_cal = st.button("🚀 Dựng Đường Cong", type="primary")
 
 # --- XỬ LÝ CHÍNH ---
-if run_cal or True: # Mặc định chạy lần đầu
-    # Lấy dữ liệu từ bảng
+if run_cal or True:
     try:
-        # Lọc bỏ các hàng trống hoặc không phải số
         df_clean = df_input.dropna().astype(float)
         x_data = df_clean["Result (Nồng độ)"].values
-        y_data = df_clean["Signal (RLU/Abs)"].values
+        y_data = df_clean["Signal (RLU)" if "RLU" in df_clean.columns else "Signal (Abs/OD)"].values
+        
+        # Sắp xếp dữ liệu
+        idx = np.argsort(x_data)
+        x_data = x_data[idx]
+        y_data = y_data[idx]
 
-        # Sắp xếp lại theo nồng độ tăng dần để vẽ cho đẹp
-        sorted_indices = np.argsort(x_data)
-        x_data = x_data[sorted_indices]
-        y_data = y_data[sorted_indices]
+        popt = None
+        r_squared = 0
+        model_name = ""
 
-        # --- FITTING ---
-        # Ước lượng tham số ban đầu (Heuristic)
-        # Tránh log(0) bằng cách thay 0 bằng giá trị rất nhỏ epsilon
-        x_data_log = x_data.copy()
-        x_data_log[x_data_log == 0] = 1e-3 
-        
-        p0 = [min(y_data), 1.0, np.median(x_data_log), max(y_data)]
-        
-        # Chạy thuật toán tối ưu
-        popt, pcov = curve_fit(logistic_4pl, x_data, y_data, p0, maxfev=10000)
-        A, B, C, D = popt
-        
-        # Tính R^2 để đánh giá độ khớp
-        residuals = y_data - logistic_4pl(x_data, *popt)
-        ss_res = np.sum(residuals**2)
-        ss_tot = np.sum((y_data - np.mean(y_data))**2)
-        r_squared = 1 - (ss_res / ss_tot)
+        # --- FITTING LOGIC ---
+        if cal_model == "Linear (Tuyến tính)":
+            model_name = "Linear Regression (Y = Ax + B)"
+            # Dùng numpy polyfit cho phương trình bậc 1
+            slope, intercept = np.polyfit(x_data, y_data, 1)
+            popt = (slope, intercept)
+            
+            # Tính R^2
+            residuals = y_data - func_linear(x_data, *popt)
+            ss_res = np.sum(residuals**2)
+            ss_tot = np.sum((y_data - np.mean(y_data))**2)
+            r_squared = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
+
+        else: # 4PL
+            model_name = "Rodbard 4-Parameter Logistic"
+            x_log = x_data.copy()
+            x_log[x_log == 0] = 1e-3
+            p0 = [min(y_data), 1.0, np.median(x_log), max(y_data)]
+            popt, _ = curve_fit(func_4pl, x_data, y_data, p0, maxfev=10000)
+            
+            # Tính R^2
+            residuals = y_data - func_4pl(x_data, *popt)
+            ss_res = np.sum(residuals**2)
+            ss_tot = np.sum((y_data - np.mean(y_data))**2)
+            r_squared = 1 - (ss_res / ss_tot)
 
     except Exception as e:
-        st.error(f"Không thể dựng đường cong. Vui lòng kiểm tra lại dữ liệu đầu vào.\nLỗi chi tiết: {e}")
+        st.error(f"Lỗi xử lý dữ liệu: {e}")
         st.stop()
 
-    # --- GIAO DIỆN CHÍNH (MAIN COLUMN) ---
+    # --- HIỂN THỊ KẾT QUẢ ---
     col_graph, col_calc = st.columns([2, 1])
 
     with col_graph:
-        st.subheader("2. Biểu đồ Đường Chuẩn (Log-Log Scale)")
+        st.subheader(f"Biểu đồ: {model_name}")
         
-        # Tạo dữ liệu mượt cho đường cong
-        x_min = max(1e-3, min(x_data[x_data > 0])) / 2
-        x_max = max(x_data) * 2
-        x_curve = np.logspace(np.log10(x_min), np.log10(x_max), 500)
-        y_curve = logistic_4pl(x_curve, *popt)
+        # Tạo điểm vẽ đường cong mịn
+        if cal_model == "Linear (Tuyến tính)":
+            x_curve = np.linspace(0, max(x_data)*1.2, 100)
+            y_curve = func_linear(x_curve, *popt)
+            log_scale = False
+        else:
+            x_min = max(1e-3, min(x_data[x_data > 0])) / 2
+            x_max = max(x_data) * 1.5
+            x_curve = np.logspace(np.log10(x_min), np.log10(x_max), 500)
+            y_curve = func_4pl(x_curve, *popt)
+            log_scale = True
 
-        # Vẽ bằng Plotly
+        # Vẽ Plotly
         fig = go.Figure()
+        fig.add_trace(go.Scatter(x=x_data, y=y_data, mode='markers', name='Điểm Cal', marker=dict(color='red', size=10)))
+        fig.add_trace(go.Scatter(x=x_curve, y=y_curve, mode='lines', name='Đường chuẩn', line=dict(color='blue')))
 
-        # 1. Điểm Cal thực tế
-        fig.add_trace(go.Scatter(
-            x=x_data, y=y_data,
-            mode='markers',
-            name='Cal Points (Thực tế)',
-            marker=dict(size=12, color='red', line=dict(width=2, color='DarkSlateGrey'))
-        ))
-
-        # 2. Đường cong Fitted
-        fig.add_trace(go.Scatter(
-            x=x_curve, y=y_curve,
-            mode='lines',
-            name='Fitted Curve (4PL)',
-            line=dict(color='blue', width=3)
-        ))
-
-        # Cấu hình trục Logarit (Đặc trưng miễn dịch)
-        fig.update_layout(
-            xaxis_type="log", yaxis_type="log",
-            xaxis_title="Nồng độ (Result)",
-            yaxis_title="Tín hiệu (Signal)",
-            template="plotly_white",
-            height=500,
-            hovermode="x unified"
+        layout_args = dict(
+            xaxis_title="Nồng độ (Result)", yaxis_title="Tín hiệu (Signal)",
+            template="plotly_white", height=500
         )
+        # Chỉ dùng log scale cho 4PL, Linear để thường dễ nhìn hơn
+        if log_scale:
+            layout_args.update(xaxis_type="log", yaxis_type="log")
+            
+        fig.update_layout(**layout_args)
         st.plotly_chart(fig, use_container_width=True)
 
         # Hiển thị tham số
-        with st.expander("Xem chi tiết tham số phương trình"):
-            st.latex(r"Signal = D + \frac{A - D}{1 + (\frac{Result}{C})^B}")
-            c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("A (Min)", f"{A:.2f}")
-            c2.metric("D (Max)", f"{D:.2f}")
-            c3.metric("C (IC50)", f"{C:.2f}")
-            c4.metric("B (Slope)", f"{B:.2f}")
-            c5.metric("R² Fit", f"{r_squared:.4f}")
+        with st.expander("Tham số phương trình"):
+            if cal_model == "Linear (Tuyến tính)":
+                st.latex(r"Signal = Slope \times Result + Intercept")
+                st.write(f"**Slope (Hệ số góc):** {popt[0]:.4f}")
+                st.write(f"**Intercept (Hệ số chặn):** {popt[1]:.4f}")
+            else:
+                st.write(f"A={popt[0]:.2f}, B={popt[1]:.2f}, C={popt[2]:.2f}, D={popt[3]:.2f}")
+            st.metric("Độ khớp (R²)", f"{r_squared:.4f}")
 
     with col_calc:
-        st.subheader("3. Công cụ Tính toán")
-        st.write("Nhập 1 thông số để tính thông số còn lại dựa trên đường cong bên cạnh.")
-
-        calc_mode = st.radio("Chọn chiều tính:", ["Signal ➔ Result", "Result ➔ Signal"])
+        st.subheader("Tính toán")
+        calc_mode = st.radio("Chiều tính:", ["Signal ➔ Result", "Result ➔ Signal"])
         
-        result_val = None
-        input_val = None
-
-        if calc_mode == "Signal ➔ Result":
-            input_val = st.number_input("Nhập Tín hiệu (Signal):", value=float(np.mean(y_data)))
-            if st.button("Tính Nồng độ"):
-                calc_res = inverse_logistic_4pl(input_val, *popt)
-                if np.isnan(calc_res):
-                    st.warning("⚠️ Tín hiệu nằm ngoài phạm vi đường cong (bão hòa hoặc thấp hơn nhiễu nền).")
+        val = st.number_input("Nhập giá trị:", value=0.0, format="%.4f")
+        
+        if st.button("Tính ngay"):
+            res = None
+            if cal_model == "Linear (Tuyến tính)":
+                if calc_mode == "Signal ➔ Result":
+                    res = inv_func_linear(val, *popt)
+                    st.success(f"Nồng độ: {res:.4f}")
+                    fig.add_trace(go.Scatter(x=[res], y=[val], mode='markers', marker=dict(color='green', size=15, symbol='star'), name='Điểm tính'))
                 else:
-                    st.success(f"📌 Nồng độ: **{calc_res:.4f}**")
-                    result_val = calc_res # Lưu để vẽ điểm lên đồ thị
-                    
-                    # Cập nhật điểm vừa tính lên đồ thị
-                    fig.add_trace(go.Scatter(
-                        x=[calc_res], y=[input_val],
-                        mode='markers', name='Kết quả vừa tính',
-                        marker=dict(size=15, color='green', symbol='star')
-                    ))
-                    st.plotly_chart(fig, use_container_width=True) # Vẽ lại đồ thị với điểm mới
-
-        else: # Result -> Signal
-            input_val = st.number_input("Nhập Nồng độ (Result):", value=float(np.median(x_data)))
-            if st.button("Tính Tín hiệu"):
-                calc_sig = logistic_4pl(input_val, *popt)
-                st.success(f"⚡ Tín hiệu: **{calc_sig:.2f}**")
-                
-                # Cập nhật điểm vừa tính lên đồ thị
-                fig.add_trace(go.Scatter(
-                    x=[input_val], y=[calc_sig],
-                    mode='markers', name='Kết quả vừa tính',
-                    marker=dict(size=15, color='orange', symbol='star')
-                ))
-                st.plotly_chart(fig, use_container_width=True)
+                    res = func_linear(val, *popt)
+                    st.success(f"Tín hiệu: {res:.4f}")
+                    fig.add_trace(go.Scatter(x=[val], y=[res], mode='markers', marker=dict(color='orange', size=15, symbol='star'), name='Điểm tính'))
+            
+            else: # 4PL
+                if calc_mode == "Signal ➔ Result":
+                    res = inv_func_4pl(val, *popt)
+                    if np.isnan(res): st.warning("Ngoài phạm vi đo")
+                    else: 
+                        st.success(f"Nồng độ: {res:.4f}")
+                        fig.add_trace(go.Scatter(x=[res], y=[val], mode='markers', marker=dict(color='green', size=15, symbol='star'), name='Điểm tính'))
+                else:
+                    res = func_4pl(val, *popt)
+                    st.success(f"Tín hiệu: {res:.4f}")
+                    fig.add_trace(go.Scatter(x=[val], y=[res], mode='markers', marker=dict(color='orange', size=15, symbol='star'), name='Điểm tính'))
+            
+            st.plotly_chart(fig, use_container_width=True)

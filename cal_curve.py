@@ -1,248 +1,174 @@
 import streamlit as st
 import numpy as np
-import pandas as pd
-from scipy.optimize import curve_fit
 import plotly.graph_objects as go
 
 # --- CẤU HÌNH TRANG ---
-st.set_page_config(page_title="Roche Advanced Calibrator", layout="wide")
-st.title("🧬 Roche Advanced Calibration Tool")
+st.set_page_config(page_title="Roche Recalibration Tool", layout="wide")
+st.title("🎛️ Roche Master Curve Recalibration")
 st.markdown("""
-Công cụ hỗ trợ đầy đủ các dạng:
-* **Sinh hóa Tuyến tính:** Glucose, Ure (Input: 2 Abs, Model: Linear)
-* **Sinh hóa Miễn dịch/Độ đục:** CRP, HbA1c (Input: 2 Abs, Model: 4PL)
-* **Miễn dịch ECLIA:** TSH, FT4 (Input: 1 Signal, Model: 4PL)
+Quy trình:
+1. Nhập tham số **Master Curve** (A, B, C, D) từ nhà sản xuất.
+2. Nhập kết quả chạy **Cal 2 điểm** thực tế tại phòng Lab.
+3. Hệ thống sẽ **Recalibrate** (nắn đường cong) và tính kết quả mẫu.
 """)
 
-# --- 1. ĐỊNH NGHĨA HÀM TOÁN HỌC ---
-def func_4pl(x, A, B, C, D):
-    return D + (A - D) / (1.0 + (x / C) ** B)
+# --- 1. HÀM TOÁN HỌC (RODBARD 4PL) ---
+def rodbard_4pl(x, A, B, C, D):
+    """Tính Tín hiệu (Signal) từ Nồng độ (x) dựa trên Master Curve"""
+    # Công thức: Signal = D + (A - D) / (1 + (x/C)^B)
+    # Lưu ý: Với Roche, đôi khi A là Max, D là Min hoặc ngược lại. 
+    # Hàm này viết theo dạng tổng quát.
+    try:
+        return D + (A - D) / (1.0 + (x / C) ** B)
+    except:
+        return np.nan
 
-def inv_func_4pl(y, A, B, C, D):
+def inv_rodbard_4pl(y, A, B, C, D):
+    """Tính Nồng độ (x) từ Tín hiệu (y)"""
     try:
         if (A - D) == 0 or (y - D) == 0: return np.nan
         term = (A - D) / (y - D) - 1
-        if term <= 0: return np.nan
+        if term <= 0: return np.nan # Lỗi toán học (căn bậc chẵn của số âm)
         return C * (term ** (1/B))
-    except: return np.nan
+    except:
+        return np.nan
 
-def func_linear(x, slope, intercept):
-    return slope * x + intercept
+# --- 2. GIAO DIỆN NHẬP LIỆU ---
 
-def inv_func_linear(y, slope, intercept):
-    if slope == 0: return np.nan
-    return (y - intercept) / slope
-
-# --- 2. SIDEBAR CẤU HÌNH ---
+# Cột trái: Nhập tham số Master Curve
 with st.sidebar:
-    st.header("1. Cấu hình Input (Đầu vào)")
+    st.header("1. Master Curve Parameters")
+    st.info("Nhập tham số từ file XML hoặc Barcode tờ hóa chất.")
     
-    # BƯỚC 1: CHỌN CÁCH NHẬP LIỆU (SINH HÓA vs MIỄN DỊCH)
-    input_mode = st.radio(
-        "Nguồn dữ liệu:",
-        ("Sinh hóa (2 điểm Abs)", "Miễn dịch (1 điểm Signal)")
+    # Giá trị mặc định lấy từ ví dụ XML Anti-TPO bạn cung cấp
+    # XML: "876721 175.289 0.762881 -1315.11"
+    # Mapping phỏng đoán: A=Min, B=Slope, C=IC50, D=Max (hoặc đảo A/D)
+    
+    param_A = st.number_input("Tham số A (Signal tại Conc 0/Min)", value=-1315.0, format="%.2f")
+    param_B = st.number_input("Tham số B (Hệ số dốc - Slope)", value=0.762881, format="%.6f")
+    param_C = st.number_input("Tham số C (Điểm uốn - IC50)", value=175.289, format="%.4f")
+    param_D = st.number_input("Tham số D (Signal tại Max/Inf)", value=876721.0, format="%.2f")
+    
+    st.markdown("---")
+    st.caption("Gợi ý từ XML Anti-TPO của bạn:\nA=-1315, B=0.76, C=175, D=876721")
+
+# Khu vực chính: Nhập kết quả Cal thực tế
+st.header("2. Nhập kết quả Calibrator tại Lab")
+col_cal1, col_cal2 = st.columns(2)
+
+with col_cal1:
+    st.subheader("Calibrator 1 (Thấp)")
+    cal1_target = st.number_input("Nồng độ Target (Cal 1):", value=0.0, min_value=0.0)
+    # Cal 1 thực tế có thể khác Master (Master nền âm, thực tế nền dương khoảng 500-1000)
+    cal1_actual_sig = st.number_input("Tín hiệu đo được (Signal 1):", value=1500.0) 
+
+with col_cal2:
+    st.subheader("Calibrator 2 (Cao)")
+    cal2_target = st.number_input("Nồng độ Target (Cal 2):", value=175.0) # Thường target gần điểm uốn
+    # Tín hiệu đo được thực tế (Ví dụ thuốc thử yếu đi chút so với Master)
+    cal2_actual_sig = st.number_input("Tín hiệu đo được (Signal 2):", value=400000.0)
+
+# --- 3. XỬ LÝ RECALIBRATION ---
+st.divider()
+
+# Bước A: Tính tín hiệu LÝ THUYẾT trên Master Curve tại 2 nồng độ Target
+# Xử lý trường hợp nồng độ 0 cho hàm log (thay bằng số rất nhỏ)
+c1_calc = cal1_target if cal1_target > 1e-5 else 1e-5
+c2_calc = cal2_target if cal2_target > 1e-5 else 1e-5
+
+master_sig_1 = rodbard_4pl(c1_calc, param_A, param_B, param_C, param_D)
+master_sig_2 = rodbard_4pl(c2_calc, param_A, param_B, param_C, param_D)
+
+# Bước B: Tìm phương trình biến đổi tuyến tính (Linear Mapping)
+# Actual_Signal = Slope * Master_Signal + Intercept
+if (master_sig_2 - master_sig_1) == 0:
+    st.error("Lỗi: Hai điểm Cal có tín hiệu Master giống hệt nhau. Vui lòng kiểm tra nồng độ.")
+    st.stop()
+
+slope = (cal2_actual_sig - cal1_actual_sig) / (master_sig_2 - master_sig_1)
+intercept = cal1_actual_sig - slope * master_sig_1
+
+# Hiển thị thông tin Cal
+col_res1, col_res2 = st.columns([1, 2])
+with col_res1:
+    st.subheader("Kết quả Recalibration")
+    st.metric("Hệ số góc (Slope)", f"{slope:.4f}", help="Tỷ lệ tín hiệu Thực tế / Master. Tốt nhất trong khoảng 0.8 - 1.2")
+    st.metric("Điểm chặn (Intercept)", f"{intercept:.2f}", help="Độ lệch nền tín hiệu.")
+    
+    status = "✅ ĐẠT (Passed)" if 0.8 <= slope <= 1.2 else "⚠️ CẢNH BÁO (Check)"
+    st.write(f"Trạng thái: **{status}**")
+
+# --- 4. VẼ BIỂU ĐỒ ---
+with col_res2:
+    # Tạo dữ liệu vẽ
+    x_draw = np.logspace(np.log10(0.1), np.log10(1000), 200)
+    
+    # 1. Đường Master Curve (Gốc)
+    y_master = rodbard_4pl(x_draw, param_A, param_B, param_C, param_D)
+    
+    # 2. Đường Recalibrated (Đường dùng cho mẫu bệnh nhân)
+    # Tín hiệu tại mỗi điểm nồng độ x sẽ bị biến đổi theo slope & intercept
+    y_recal = y_master * slope + intercept
+    
+    fig = go.Figure()
+    
+    # Vẽ Master
+    fig.add_trace(go.Scatter(x=x_draw, y=y_master, mode='lines', name='Master Curve (Gốc)', line=dict(dash='dash', color='gray')))
+    
+    # Vẽ Recalibrated
+    fig.add_trace(go.Scatter(x=x_draw, y=y_recal, mode='lines', name='Recalibrated (Thực tế)', line=dict(color='blue', width=3)))
+    
+    # Vẽ 2 điểm Cal thực tế
+    fig.add_trace(go.Scatter(
+        x=[cal1_target if cal1_target>0 else 0.1, cal2_target], 
+        y=[cal1_actual_sig, cal2_actual_sig],
+        mode='markers', name='Điểm Cal Lab', marker=dict(color='red', size=12, symbol='x')
+    ))
+
+    fig.update_layout(
+        title="So sánh Đường chuẩn Gốc và Thực tế",
+        xaxis_title="Nồng độ (Log scale)",
+        yaxis_title="Tín hiệu (Signal)",
+        xaxis_type="log", yaxis_type="log",
+        height=450, margin=dict(l=0, r=0, t=40, b=0)
     )
+    st.plotly_chart(fig, use_container_width=True)
+
+# --- 5. TÍNH KẾT QUẢ MẪU (BỆNH NHÂN) ---
+st.divider()
+st.header("3. Tính kết quả mẫu (Sample Calculator)")
+
+col_input, col_output = st.columns(2)
+with col_input:
+    sample_signal = st.number_input("Nhập Tín hiệu mẫu (RLU/Counts):", value=50000.0)
     
-    calc_method = "None"
-    if input_mode == "Sinh hóa (2 điểm Abs)":
-        st.caption("Nhập Raw Absorbance từ máy (Main + Sub/Blank)")
-        calc_method = st.selectbox(
-            "Cách tính Delta Abs:",
-            ("Abs 2 - Abs 1 (Tăng quang)", "Abs 1 - Abs 2 (Giảm quang)")
-        )
+    st.markdown("""
+    **Công thức chuyển đổi:**
+    1. **Chuẩn hóa:** $Sig_{Master} = (Sig_{Lab} - Intercept) / Slope$
+    2. **Tra ngược:** $Result = f^{-1}(Sig_{Master}, A, B, C, D)$
+    """)
 
-    st.divider()
-    
-    st.header("2. Cấu hình Model (Toán học)")
-    # BƯỚC 2: CHỌN MÔ HÌNH TOÁN HỌC
-    # Miễn dịch mặc định là 4PL, nhưng Sinh hóa có thể chọn Linear hoặc 4PL
-    model_options = ["Linear (Tuyến tính)", "Rodbard (4PL / Non-Linear)"]
-    if input_mode == "Miễn dịch (1 điểm Signal)":
-        cal_model = "Rodbard (4PL / Non-Linear)" # Miễn dịch luôn cong
-        st.info("Miễn dịch mặc định dùng mô hình Rodbard 4PL.")
-    else:
-        cal_model = st.selectbox("Chọn mô hình đường chuẩn:", model_options)
-        if cal_model == "Linear (Tuyến tính)":
-            st.caption("Dùng cho: Glu, Ure, Cre, AST, ALT...")
+with col_output:
+    if st.button("Tính kết quả ngay"):
+        # B1: Chuyển đổi Signal Lab -> Signal Master tương đương
+        if slope == 0:
+            st.error("Lỗi: Slope = 0")
         else:
-            st.caption("Dùng cho: CRP, HbA1c, RF, ASO, IgM...")
-
-    st.divider()
-
-    # BƯỚC 3: DATA EDITOR
-    st.header("3. Dữ liệu Cal")
-    
-    if input_mode == "Sinh hóa (2 điểm Abs)":
-        # Data mẫu cho Sinh hóa
-        if cal_model == "Linear (Tuyến tính)":
-             # Mẫu Linear (ít điểm)
-            default_data = pd.DataFrame({
-                "Result": [0.0, 100.0],
-                "Abs 1":  [0.05, 0.05],
-                "Abs 2":  [0.06, 0.80]
-            })
-        else:
-            # Mẫu Non-Linear (CRP - Nhiều điểm)
-            default_data = pd.DataFrame({
-                "Result": [0.0, 5.0, 20.0, 80.0, 160.0, 320.0],
-                "Abs 1":  [0.02, 0.02, 0.02, 0.02, 0.02, 0.02],
-                "Abs 2":  [0.03, 0.10, 0.40, 1.20, 1.80, 2.10] # Bão hòa dần
-            })
-    else:
-        # Mẫu Miễn dịch
-        default_data = pd.DataFrame({
-            "Result": [0.0, 0.5, 5.0, 50.0, 100.0],
-            "Signal": [400, 1200, 8500, 120000, 210000]
-        })
-
-    df_input = st.data_editor(default_data, num_rows="dynamic", hide_index=True)
-    run_cal = st.button("🚀 Dựng Đường Cong", type="primary")
-
-# --- 3. XỬ LÝ LOGIC ---
-if run_cal or True:
-    try:
-        df_clean = df_input.dropna().astype(float)
-        x_data = df_clean["Result"].values
-        
-        # Xử lý Y-Data (Delta Abs hoặc Signal)
-        y_label = ""
-        if input_mode == "Sinh hóa (2 điểm Abs)":
-            abs1 = df_clean["Abs 1"].values
-            abs2 = df_clean["Abs 2"].values
-            if "Abs 2 - Abs 1" in calc_method:
-                y_data = abs2 - abs1
+            sig_normalized = (sample_signal - intercept) / slope
+            
+            # B2: Tính nồng độ từ Signal Master bằng tham số A,B,C,D gốc
+            final_result = inv_rodbard_4pl(sig_normalized, param_A, param_B, param_C, param_D)
+            
+            if np.isnan(final_result):
+                st.warning("⚠️ Không tính được kết quả (Tín hiệu ngoài dải đo hoặc lỗi toán học).")
             else:
-                y_data = abs1 - abs2
-            y_label = "Delta Absorbance"
-        else:
-            y_data = df_clean["Signal"].values
-            y_label = "Signal (RLU/Counts)"
-
-        # Sort
-        idx = np.argsort(x_data)
-        x_data = x_data[idx]
-        y_data = y_data[idx]
-
-        # Fitting Variables
-        popt = None
-        r_squared = 0
-        
-        # --- THUẬT TOÁN FITTING ---
-        if cal_model == "Linear (Tuyến tính)":
-            slope, intercept = np.polyfit(x_data, y_data, 1)
-            popt = (slope, intercept)
-            
-            # Tính R2
-            residuals = y_data - func_linear(x_data, *popt)
-            ss_res = np.sum(residuals**2)
-            ss_tot = np.sum((y_data - np.mean(y_data))**2)
-            r_squared = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
-
-        else: # Rodbard 4PL
-            # Ước lượng tham số ban đầu (Quan trọng cho Sinh hóa vì số nhỏ)
-            # Với Sinh hóa, Abs max chỉ tầm 2.0-3.0, không phải hàng nghìn như miễn dịch
-            x_log = x_data.copy()
-            x_log[x_log == 0] = 1e-4 # Tránh log(0)
-            
-            p0 = [min(y_data), 1.0, np.median(x_log), max(y_data)]
-            
-            # Chạy fitting
-            popt, pcov = curve_fit(func_4pl, x_data, y_data, p0, maxfev=20000)
-            
-            residuals = y_data - func_4pl(x_data, *popt)
-            ss_res = np.sum(residuals**2)
-            ss_tot = np.sum((y_data - np.mean(y_data))**2)
-            r_squared = 1 - (ss_res / ss_tot)
-
-    except Exception as e:
-        st.error(f"Không thể dựng đường cong. Lỗi: {e}")
-        st.stop()
-
-    # --- 4. HIỂN THỊ BIỂU ĐỒ ---
-    col_graph, col_calc = st.columns([2, 1])
-
-    with col_graph:
-        st.subheader("Biểu đồ Đường chuẩn")
-        
-        fig = go.Figure()
-
-        # Vẽ điểm gốc
-        fig.add_trace(go.Scatter(
-            x=x_data, y=y_data, mode='markers', name='Cal Points',
-            marker=dict(color='red', size=12, line=dict(width=1, color='black'))
-        ))
-
-        # Vẽ đường Fit
-        if cal_model == "Linear (Tuyến tính)":
-            x_curve = np.linspace(0, max(x_data)*1.1, 100)
-            y_curve = func_linear(x_curve, *popt)
-            fig.add_trace(go.Scatter(x=x_curve, y=y_curve, mode='lines', name='Linear Fit', line=dict(color='blue')))
-            
-            # Linear dùng trục thường
-            fig.update_layout(xaxis_type="linear", yaxis_type="linear")
-        
-        else: # 4PL
-            # Tạo dải X mượt (logspace)
-            x_min_plot = max(1e-3, min(x_data[x_data>0])) / 2
-            x_max_plot = max(x_data) * 1.5
-            x_curve = np.logspace(np.log10(x_min_plot), np.log10(x_max_plot), 500)
-            y_curve = func_4pl(x_curve, *popt)
-            
-            fig.add_trace(go.Scatter(x=x_curve, y=y_curve, mode='lines', name='4PL Fit', line=dict(color='blue')))
-            
-            # 4PL thường dùng trục Log-Log hoặc Linear-Linear tùy người xem
-            # Ở đây để Log cho X, Linear cho Y (Semi-log) thường dùng trong sinh hóa miễn dịch
-            # Hoặc Log-Log nếu dải đo rộng. Tôi sẽ để Log-Log mặc định.
-            fig.update_layout(xaxis_type="log", yaxis_type="log" if input_mode!="Sinh hóa (2 điểm Abs)" else "linear") 
-
-        fig.update_layout(
-            title=f"Model: {cal_model} | R²: {r_squared:.4f}",
-            xaxis_title="Nồng độ (Concentration)",
-            yaxis_title=y_label,
-            template="plotly_white",
-            height=500
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-    # --- 5. CÔNG CỤ TÍNH TOÁN ---
-    with col_calc:
-        st.subheader("Tính mẫu (Interpolation)")
-        st.caption(f"Đang dùng mô hình: **{cal_model}**")
-        
-        # INPUT CHO TÍNH TOÁN
-        input_val_calc = 0.0
-        
-        if input_mode == "Sinh hóa (2 điểm Abs)":
-            c1, c2 = st.columns(2)
-            p_abs1 = c1.number_input("Abs 1 (Sample)", value=0.0, format="%.4f")
-            p_abs2 = c2.number_input("Abs 2 (Sample)", value=0.0, format="%.4f")
-            
-            if "Abs 2 - Abs 1" in calc_method:
-                input_val_calc = p_abs2 - p_abs1
-            else:
-                input_val_calc = p_abs1 - p_abs2
-            
-            st.info(f"Delta Abs tính được: **{input_val_calc:.4f}**")
-        else:
-            input_val_calc = st.number_input("Nhập Signal (Sample)", value=0.0)
-
-        # NÚT TÍNH
-        if st.button("Tính kết quả"):
-            res = np.nan
-            if cal_model == "Linear (Tuyến tính)":
-                res = inv_func_linear(input_val_calc, *popt)
-            else: # 4PL
-                res = inv_func_4pl(input_val_calc, *popt)
-            
-            if np.isnan(res) or res < 0:
-                st.warning("⚠️ Không tính được (Ngoài phạm vi hoặc tín hiệu âm).")
-            else:
-                st.success(f"Nồng độ: **{res:.4f}**")
+                st.success(f"KẾT QUẢ: **{final_result:.4f}**")
+                st.caption(f"(Tín hiệu quy đổi về Master: {sig_normalized:.2f})")
                 
                 # Vẽ điểm mẫu lên đồ thị
                 fig.add_trace(go.Scatter(
-                    x=[res], y=[input_val_calc],
-                    mode='markers', name='Kết quả mẫu',
+                    x=[final_result], y=[sample_signal],
+                    mode='markers', name='Mẫu vừa tính',
                     marker=dict(color='green', size=15, symbol='star')
                 ))
                 st.plotly_chart(fig, use_container_width=True)

@@ -70,7 +70,13 @@ with col2:
     c2_avg = (c2_meas_1 + c2_meas_2) / 2
     st.info(f"👉 Trung bình Signal 2: **{c2_avg:,.1f}**")
 
-# --- 3. TÍNH TOÁN & SO SÁNH ---
+# --- 3. XỬ LÝ TÍNH TOÁN & SO SÁNH ---
+
+# Khởi tạo state để lưu kết quả Cal nếu chưa có
+if 'cal_results' not in st.session_state:
+    st.session_state.cal_results = None # Sẽ lưu dict: {'slope': ..., 'intercept': ...}
+
+# Nút thực hiện Cal (Chỉ tính toán và lưu vào bộ nhớ)
 if st.button("🚀 Thực hiện Recalibration", type="primary"):
     
     # A. Tính tín hiệu Master lý thuyết
@@ -78,66 +84,81 @@ if st.button("🚀 Thực hiện Recalibration", type="primary"):
     m_sig_2 = get_master_signal(c2_target)
     
     # B. Tính Slope & Intercept
-    slope = (c2_avg - c1_avg) / (m_sig_2 - m_sig_1)
-    intercept = c1_avg - slope * m_sig_1
+    slope_val = (c2_avg - c1_avg) / (m_sig_2 - m_sig_1)
+    intercept_val = c1_avg - slope_val * m_sig_1
+    
+    # C. LƯU VÀO SESSION STATE (QUAN TRỌNG NHẤT)
+    st.session_state.cal_results = {
+        'slope': slope_val,
+        'intercept': intercept_val,
+        'm_sig_1': m_sig_1,
+        'm_sig_2': m_sig_2
+    }
+    st.success("Đã Recalibration thành công! Kết quả đã được lưu.")
+
+# --- 4. HIỂN THỊ KẾT QUẢ & BIỂU ĐỒ (LUÔN HIỂN THỊ NẾU ĐÃ CÓ KẾT QUẢ TRONG MEMORY) ---
+if st.session_state.cal_results is not None:
+    # Lấy dữ liệu từ bộ nhớ ra dùng
+    cal_data = st.session_state.cal_results
+    slope = cal_data['slope']
+    intercept = cal_data['intercept']
     
     st.divider()
     res_col1, res_col2 = st.columns([1, 2])
     
     with res_col1:
         st.subheader("Kết quả Tính toán")
-        st.write("Thông số hiệu chuẩn (Calibration Factors):")
+        st.write("Thông số hiệu chuẩn:")
         st.metric("Slope (Độ dốc)", f"{slope:.4f}")
         st.metric("Intercept (Chặn)", f"{intercept:,.2f}")
         
         if 0.8 <= slope <= 1.2:
-            st.success("✅ CAL PASSED (Đạt chuẩn)")
+            st.success("✅ CAL PASSED")
         else:
-            st.error("❌ CAL FAILED (Ngoài dải cho phép)")
-            
-        st.caption(f"Tín hiệu Master tại {c1_target}: {m_sig_1:,.0f}")
-        st.caption(f"Tín hiệu Master tại {c2_target}: {m_sig_2:,.0f}")
+            st.error("❌ CAL FAILED")
 
     with res_col2:
         st.subheader("Biểu đồ Đường chuẩn")
-        
+        # Vẽ biểu đồ (Code vẽ giữ nguyên, chỉ thay biến slope/intercept)
         x_plot = np.logspace(np.log10(5), np.log10(1000), 200)
         y_master = [get_master_signal(x) for x in x_plot]
         y_recal = [val * slope + intercept for val in y_master]
         
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=x_plot, y=y_master, mode='lines', name='Master Curve (Gốc)', line=dict(dash='dash', color='gray')))
-        fig.add_trace(go.Scatter(x=x_plot, y=y_recal, mode='lines', name='Actual Curve (Hiện tại)', line=dict(color='blue')))
+        fig.add_trace(go.Scatter(x=x_plot, y=y_master, mode='lines', name='Master Curve', line=dict(dash='dash', color='gray')))
+        fig.add_trace(go.Scatter(x=x_plot, y=y_recal, mode='lines', name='Actual Curve', line=dict(color='blue')))
+        # Vẽ điểm Cal thực tế
         fig.add_trace(go.Scatter(
             x=[c1_target, c2_target], y=[c1_avg, c2_avg],
             mode='markers', name='Điểm Cal Lab', marker=dict(size=12, color='red', symbol='cross')
         ))
-
-        fig.update_layout(
-            xaxis_type="log", yaxis_type="log",
-            xaxis_title="Nồng độ ATPO (IU/mL)",
-            yaxis_title="Tín hiệu (Counts)",
-            height=500
-        )
+        fig.update_layout(xaxis_type="log", yaxis_type="log", height=450)
         st.plotly_chart(fig, use_container_width=True)
 
-    # --- 4. TÍNH MẪU THỬ (Lồng bên trong để dùng biến slope/intercept) ---
+    # --- 5. TÍNH MẪU THỬ (NẰM TRONG KHỐI IF CỦA KẾT QUẢ ĐÃ LƯU) ---
     st.divider()
     st.subheader("🧪 Thử tính mẫu bệnh nhân")
     
-    # Form giúp gom nhóm nhập liệu để trông gọn hơn
-    with st.form("sample_calc_form"):
+    # Dùng Form để gom nhóm hành động nhập + bấm nút
+    with st.form("calc_form"):
         c_test_sig = st.number_input("Nhập Tín hiệu mẫu (Ví dụ: 400000)", value=400000.0)
-        calc_submitted = st.form_submit_button("Tính kết quả mẫu")
+        submit_btn = st.form_submit_button("Tính kết quả mẫu")
         
-        if calc_submitted:
+        if submit_btn:
+            # Lúc này biến slope và intercept được lấy từ st.session_state.cal_results
+            # nên không bị mất đi dù trang web reload
             res = get_concentration(c_test_sig, slope, intercept)
-            st.success(f"Kết quả nồng độ: **{res:.4f} IU/mL**")
             
-            # Vẽ thêm điểm này
+            st.info(f"👉 Kết quả nồng độ: **{res:.4f} IU/mL**")
+            
+            # Vẽ điểm mẫu lên biểu đồ
             fig.add_trace(go.Scatter(
                 x=[res], y=[c_test_sig],
                 mode='markers', name='Mẫu Bệnh Nhân', marker=dict(size=15, color='green', symbol='star')
             ))
-            # Cần vẽ lại chart để hiện điểm mới
-            st.plotly_chart(fig, use_container_width=True, key="chart_updated")
+            # Cập nhật lại biểu đồ bên trên (dùng key để force redraw)
+            with res_col2:
+                st.plotly_chart(fig, use_container_width=True, key="final_chart_with_sample")
+
+else:
+    st.info("👈 Vui lòng nhập thông số Cal và bấm 'Thực hiện Recalibration' trước.")

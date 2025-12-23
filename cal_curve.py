@@ -43,65 +43,50 @@ def inv_rod_4pl(y, A, B, C, D):
     except: return np.nan
 
 def parse_roche_xml(uploaded_file):
-    """Đọc file XML và trích xuất tham số"""
     try:
         tree = ET.parse(uploaded_file)
         root = tree.getroot()
-        
-        # Tìm tên xét nghiệm
         test_name = "Unknown"
         for child in root.iter():
             if 'ContainerNameShort' in child.attrib:
                 test_name = child.attrib['ContainerNameShort']
                 break
-
-        # 1. Tìm thẻ ĐỊNH LƯỢNG (Quantitative)
+        
         quant_tag = None
         for child in root.iter():
             if 'RodbardCurveParameters' in child.attrib:
                 quant_tag = child
                 break
         
-        # 2. Tìm thẻ ĐỊNH TÍNH (Qualitative)
         qual_tag = None
         for child in root.iter():
             if 'CutoffFNeg' in child.attrib:
                 qual_tag = child
                 break
-
         return test_name, quant_tag, qual_tag
-
     except Exception as e:
         st.error(f"Lỗi đọc file XML: {e}")
         return None, None, None
 
 # ==============================================================================
-# 3. SIDEBAR: IMPORT & CẤU HÌNH
+# 3. SIDEBAR
 # ==============================================================================
 with st.sidebar:
     st.title("🎛️ Control Panel")
     
-    # --- MODULE IMPORT XML ---
+    # IMPORT XML
     st.markdown("### 📂 Import Parameter File")
     uploaded_file = st.file_uploader("Upload Roche XML", type=['xml'])
     
     if uploaded_file is not None:
         name, quant_data, qual_data = parse_roche_xml(uploaded_file)
-        
         if name:
             st.success(f"Đã tải xét nghiệm: **{name}**")
-            
-            # Xử lý dữ liệu định lượng
             if quant_data is not None:
                 p_str = quant_data.attrib['RodbardCurveParameters']
-                # Mapping Roche Order: A (Dose 0), C (IC50), B (Slope), D (Inf)
                 p_vals = [float(x) for x in p_str.split()]
-                st.session_state.master_params = {
-                    'A': p_vals[0], 'C': p_vals[1], 'B': p_vals[2], 'D': p_vals[3]
-                }
+                st.session_state.master_params = {'A': p_vals[0], 'C': p_vals[1], 'B': p_vals[2], 'D': p_vals[3]}
                 st.toast("Đã cập nhật tham số Master Curve (4PL)", icon="✅")
-
-            # Xử lý dữ liệu định tính
             if qual_data is not None:
                 attr = qual_data.attrib
                 st.session_state.qual_params = {
@@ -117,16 +102,10 @@ with st.sidebar:
                 st.toast("Đã cập nhật tham số Cutoff", icon="✅")
     
     st.divider()
-    
-    # CHỌN CHẾ ĐỘ
-    app_mode = st.radio(
-        "Chọn Chức năng:",
-        ["1. Định lượng (Quantitative)", "2. Định tính (Qualitative)", "3. Troubleshoot (Lịch sử)"]
-    )
-    
+    app_mode = st.radio("Chọn Chức năng:", ["1. Định lượng (Quantitative)", "2. Định tính (Qualitative)", "3. Troubleshoot (Lịch sử)"])
     st.divider()
     
-    # HIỂN THỊ THAM SỐ (Cho phép sửa tay sau khi import)
+    # MANUAL EDIT
     if app_mode == "1. Định lượng (Quantitative)" or app_mode == "3. Troubleshoot (Lịch sử)":
         st.subheader("⚙️ Master Curve (4PL)")
         p = st.session_state.master_params
@@ -135,7 +114,6 @@ with st.sidebar:
         mC = st.number_input("C", value=p['C'], format="%.4f")
         mD = st.number_input("D", value=p['D'], format="%.0f")
         st.session_state.master_params.update({'A': mA, 'B': mB, 'C': mC, 'D': mD})
-        
     elif app_mode == "2. Định tính (Qualitative)":
         st.subheader("⚙️ Cutoff Params")
         qp = st.session_state.qual_params
@@ -170,56 +148,67 @@ if app_mode == "1. Định lượng (Quantitative)":
             if (ms2 - ms1) != 0:
                 slope = (s2 - s1) / (ms2 - ms1)
                 intercept = s1 - slope * ms1
-                st.session_state.quant_results = {
-                    'slope': slope, 'intercept': intercept,
-                    't1': t1, 't2': t2, 's1': s1, 's2': s2
-                }
-                st.success("Recalibration OK!")
+                st.session_state.quant_results = {'slope': slope, 'intercept': intercept, 't1': t1, 't2': t2, 's1': s1, 's2': s2}
             else:
-                st.error("Lỗi tính toán!")
+                st.error("Lỗi tính toán: Mẫu số bằng 0")
 
     with col_out:
         if st.session_state.quant_results:
             res = st.session_state.quant_results
             p = st.session_state.master_params
             
-            # KPI
+            # KPI DISPLAY
             k1, k2, k3 = st.columns(3)
             k1.metric("Slope", f"{res['slope']:.4f}")
             k2.metric("Intercept", f"{res['intercept']:.0f}")
-            status = "✅ PASS" if 0.8 <= res['slope'] <= 1.2 else "❌ FAIL"
-            k3.metric("Status", status)
             
-            # --- CÔNG CỤ TÍNH TOÁN 2 CHIỀU ---
+            # Đánh giá PASS/FAIL
+            is_pass = 0.8 <= res['slope'] <= 1.2
+            if is_pass:
+                k3.success("✅ PASS")
+            else:
+                k3.error("❌ FAIL") # Hiển thị Fail nhưng vẫn tiếp tục vẽ bên dưới
+            
+            # --- VẼ BIỂU ĐỒ (LUÔN VẼ DÙ FAIL) ---
+            st.subheader("2. Biểu đồ Recalibration")
+            x_plot = np.logspace(np.log10(5), np.log10(1000), 200)
+            y_master = [rod_4pl(x, **p) for x in x_plot]
+            y_recal = [y * res['slope'] + res['intercept'] for y in y_master]
+            
+            fig = go.Figure()
+            # Master Curve
+            fig.add_trace(go.Scatter(x=x_plot, y=y_master, mode='lines', name='Master (Gốc)', line=dict(dash='dash', color='gray')))
+            # Actual Curve (Màu đỏ nếu Fail, Xanh nếu Pass)
+            line_color = 'blue' if is_pass else 'red'
+            line_name = 'Hiện tại (OK)' if is_pass else 'Hiện tại (FAIL)'
+            fig.add_trace(go.Scatter(x=x_plot, y=y_recal, mode='lines', name=line_name, line=dict(color=line_color, width=3)))
+            # Points
+            fig.add_trace(go.Scatter(x=[res['t1'], res['t2']], y=[res['s1'], res['s2']], mode='markers', name='Điểm Cal', marker=dict(size=12, color='black', symbol='x')))
+            
+            fig.update_layout(xaxis_type="log", yaxis_type="log", height=450, title="So sánh Master vs Thực tế")
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # --- CÔNG CỤ TÍNH 2 CHIỀU (LUÔN HIỆN) ---
             st.divider()
-            st.subheader("2. Công cụ chuyển đổi (2 Chiều)")
+            calc_type = st.radio("Chuyển đổi:", ["Signal ➔ Result", "Result ➔ Signal"], horizontal=True)
             
-            calc_type = st.radio("Chọn hướng tính toán:", 
-                                 ["📡 Signal ➔ Result (Tính kết quả mẫu)", 
-                                  "🧪 Result ➔ Signal (Dự đoán tín hiệu)"], 
-                                 horizontal=True)
-            
-            if calc_type == "📡 Signal ➔ Result (Tính kết quả mẫu)":
-                with st.form("calc_sig_to_res"):
+            if calc_type == "Signal ➔ Result":
+                with st.form("calc_s2r"):
                     in_sig = st.number_input("Nhập Signal mẫu:", value=400000.0)
                     if st.form_submit_button("Tính Result"):
-                        # Quy trình: Signal Thô -> Chuẩn hóa (trừ nền/chia slope) -> Tra ngược Master
                         norm_sig = (in_sig - res['intercept']) / res['slope']
                         final_conc = inv_rod_4pl(norm_sig, **p)
-                        
                         st.success(f"Kết quả: **{final_conc:.4f}**")
-                        st.caption(f"(Tín hiệu đã chuẩn hóa về Master: {norm_sig:.0f})")
-                        
-            else: # Result -> Signal
-                with st.form("calc_res_to_sig"):
+                        # Vẽ điểm mẫu
+                        fig.add_trace(go.Scatter(x=[final_conc], y=[in_sig], mode='markers', name='Mẫu', marker=dict(size=15, color='orange', symbol='star')))
+                        st.plotly_chart(fig, use_container_width=True, key='chart_s2r')
+            else:
+                with st.form("calc_r2s"):
                     in_conc = st.number_input("Nhập Result mong muốn:", value=100.0)
                     if st.form_submit_button("Dự đoán Signal"):
-                        # Quy trình: Tra xuôi Master -> Biến đổi (nhân slope + nền) -> Signal Thô
                         master_sig = rod_4pl(in_conc, **p)
                         pred_sig = master_sig * res['slope'] + res['intercept']
-                        
-                        st.info(f"Tín hiệu dự kiến: **{pred_sig:,.0f}**")
-                        st.caption(f"(Tín hiệu trên Master gốc: {master_sig:,.0f})")
+                        st.info(f"Signal dự kiến: **{pred_sig:,.0f}**")
 
 # ==============================================================================
 # MODE 2: ĐỊNH TÍNH (QUALITATIVE)
@@ -238,55 +227,75 @@ elif app_mode == "2. Định tính (Qualitative)":
         if st.button("🚀 Tính Cutoff", type="primary"):
             msgs = []
             is_pass = True
-            # Simple QC Checks
-            if not (qp['MinNeg'] <= sig_neg <= qp['MaxNeg']): is_pass = False; msgs.append("Neg ngoài dải")
-            if not (qp['MinPos'] <= sig_pos <= qp['MaxPos']): is_pass = False; msgs.append("Pos ngoài dải")
-            if (sig_pos - sig_neg) < qp['MinDiff']: is_pass = False; msgs.append("Diff quá nhỏ")
+            # QC Checks
+            if not (qp['MinNeg'] <= sig_neg <= qp['MaxNeg']): is_pass = False; msgs.append(f"Neg ngoài dải ({qp['MinNeg']}-{qp['MaxNeg']})")
+            if not (qp['MinPos'] <= sig_pos <= qp['MaxPos']): is_pass = False; msgs.append(f"Pos ngoài dải ({qp['MinPos']}-{qp['MaxPos']})")
+            if (sig_pos - sig_neg) < qp['MinDiff']: is_pass = False; msgs.append(f"Diff quá nhỏ (<{qp['MinDiff']})")
             
             cutoff = (sig_neg * qp['FNeg']) + (sig_pos * qp['FPos']) + qp['Const']
-            st.session_state.qual_results = {'cutoff': cutoff, 'is_pass': is_pass, 'msgs': msgs}
+            st.session_state.qual_results = {'cutoff': cutoff, 'is_pass': is_pass, 'msgs': msgs, 'sig_neg': sig_neg, 'sig_pos': sig_pos}
 
     with col_out:
         if st.session_state.qual_results:
             res = st.session_state.qual_results
-            st.subheader("2. Kết quả")
+            st.subheader("2. Kết quả & Biểu đồ")
+            
+            # Báo cáo Pass/Fail
             if res['is_pass']:
-                st.success(f"Cutoff = {res['cutoff']:,.0f}")
-                
-                # --- TÍNH TOÁN 2 CHIỀU ---
-                st.divider()
-                st.subheader("3. Công cụ chuyển đổi")
-                
-                q_calc_type = st.radio("Hướng tính:", ["Signal ➔ COI", "COI ➔ Signal"], horizontal=True)
-                
-                if q_calc_type == "Signal ➔ COI":
-                    with st.form("calc_coi"):
-                        in_sig = st.number_input("Signal mẫu:", value=100000.0)
-                        if st.form_submit_button("Tính COI"):
-                            coi = in_sig / res['cutoff']
-                            concl = "DƯƠNG TÍNH" if coi >= 1.0 else "ÂM TÍNH"
-                            st.metric("COI", f"{coi:.2f}", concl)
-                            
-                else: # COI -> Signal
-                    with st.form("calc_sig_q"):
-                        in_coi = st.number_input("COI mong muốn:", value=1.0)
-                        if st.form_submit_button("Tính Signal"):
-                            # Signal = COI * Cutoff
-                            pred_sig = in_coi * res['cutoff']
-                            st.info(f"Tín hiệu tương ứng: **{pred_sig:,.0f}**")
-                            
+                st.success(f"✅ PASSED | Cutoff = {res['cutoff']:,.0f}")
             else:
-                st.error("Cal Failed")
+                st.error(f"⛔ FAILED | Cutoff = {res['cutoff']:,.0f} (Invalid)")
                 for m in res['msgs']: st.write(m)
+            
+            # --- VẼ BIỂU ĐỒ (LUÔN VẼ DÙ FAIL) ---
+            # Để người dùng thấy trực quan tại sao Fail (ví dụ cột Neg quá cao)
+            fig_bar = go.Figure()
+            # Cột Neg
+            color_neg = 'green' if (qp['MinNeg'] <= res['sig_neg'] <= qp['MaxNeg']) else 'red'
+            fig_bar.add_trace(go.Bar(x=['Neg Cal'], y=[res['sig_neg']], marker_color=color_neg, name='Negative'))
+            
+            # Cột Cutoff
+            fig_bar.add_trace(go.Bar(x=['Cutoff'], y=[res['cutoff']], marker_color='gray', name='Cutoff'))
+            
+            # Cột Pos
+            color_pos = 'blue' if (qp['MinPos'] <= res['sig_pos'] <= qp['MaxPos']) else 'red'
+            fig_bar.add_trace(go.Bar(x=['Pos Cal'], y=[res['sig_pos']], marker_color=color_pos, name='Positive'))
+            
+            # Vẽ các đường giới hạn (Min/Max) để dễ so sánh
+            fig_bar.add_hline(y=qp['MaxNeg'], line_dash="dot", annotation_text="Max Neg", line_color="green")
+            fig_bar.add_hline(y=qp['MinPos'], line_dash="dot", annotation_text="Min Pos", line_color="blue")
+            
+            fig_bar.update_layout(title="Trực quan hóa Tín hiệu Cal", height=400)
+            st.plotly_chart(fig_bar, use_container_width=True)
+            
+            # --- CÔNG CỤ TÍNH MẪU (LUÔN HIỆN) ---
+            st.divider()
+            q_calc = st.radio("Tính toán:", ["Signal ➔ COI", "COI ➔ Signal"], horizontal=True)
+            
+            if q_calc == "Signal ➔ COI":
+                with st.form("calc_coi"):
+                    in_sig = st.number_input("Signal mẫu:", value=100000.0)
+                    if st.form_submit_button("Tính COI"):
+                        coi = in_sig / res['cutoff']
+                        concl = "DƯƠNG TÍNH" if coi >= 1.0 else "ÂM TÍNH"
+                        st.metric("COI", f"{coi:.2f}", concl)
+                        # Vẽ điểm mẫu
+                        fig_bar.add_trace(go.Scatter(x=['Mẫu'], y=[in_sig], mode='markers', marker=dict(size=15, color='orange', symbol='star')))
+                        st.plotly_chart(fig_bar, use_container_width=True, key='qual_chart_upd')
+            else:
+                with st.form("calc_sig_q"):
+                    in_coi = st.number_input("COI mong muốn:", value=1.0)
+                    if st.form_submit_button("Dự đoán Signal"):
+                        pred_sig = in_coi * res['cutoff']
+                        st.info(f"Signal dự kiến: **{pred_sig:,.0f}**")
 
 # ==============================================================================
 # MODE 3: TROUBLESHOOT
 # ==============================================================================
 elif app_mode == "3. Troubleshoot (Lịch sử)":
-    st.title("📈 Phân tích Xu hướng (Trend)")
-    st.info("Nhập dữ liệu lịch sử để vẽ biểu đồ.")
+    st.title("📈 Mode 3: Trend Analysis")
+    st.info("Phân tích xu hướng Slope để dự đoán lỗi.")
     
-    # Dữ liệu demo
     df_sample = pd.DataFrame([
         {"Date": "2023-12-01", "Target 1": 42.1, "Target 2": 372.0, "Signal 1": 590000, "Signal 2": 295000},
         {"Date": "2023-12-15", "Target 1": 42.1, "Target 2": 372.0, "Signal 1": 583602, "Signal 2": 289073},
@@ -307,6 +316,6 @@ elif app_mode == "3. Troubleshoot (Lịch sử)":
             
         rdf = pd.DataFrame(res_list)
         fig = go.Figure()
-        fig.add_hrect(y0=0.8, y1=1.2, fillcolor="green", opacity=0.1, line_width=0)
+        fig.add_hrect(y0=0.8, y1=1.2, fillcolor="green", opacity=0.1, line_width=0, annotation_text="Safe Zone")
         fig.add_trace(go.Scatter(x=rdf['Date'], y=rdf['Slope'], mode='lines+markers', name='Slope'))
         st.plotly_chart(fig, use_container_width=True)

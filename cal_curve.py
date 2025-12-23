@@ -5,26 +5,40 @@ import plotly.graph_objects as go
 st.set_page_config(page_title="ATPO Real Cal Check", layout="wide")
 st.title("🧪 Kiểm tra Cal ATPO (Dữ liệu thực tế)")
 
-# --- 1. THÔNG SỐ MASTER CURVE (TỪ XML) ---
-# Lot: 882670
-A_master = 876721.0   # Max Signal (Dose 0)
-B_master = 0.762881   # Slope
-C_master = 175.289    # IC50
-D_master = -1315.11   # Min Signal (Infinite Dose)
+# --- 0. KHỞI TẠO SESSION STATE (QUAN TRỌNG) ---
+# Kiểm tra xem các biến này đã có trong bộ nhớ chưa, nếu chưa thì tạo mới
+if 'A_val' not in st.session_state: st.session_state.A_val = 876721.0
+if 'B_val' not in st.session_state: st.session_state.B_val = 0.762881
+if 'C_val' not in st.session_state: st.session_state.C_val = 175.289
+if 'D_val' not in st.session_state: st.session_state.D_val = -1315.11
 
+# --- 1. NHẬP THAM SỐ MASTER CURVE (CÓ LƯU TRẠNG THÁI) ---
+with st.sidebar:
+    st.header("Cấu hình Master Curve")
+    st.info("Nhập tham số từ XML/Barcode (Sẽ được lưu lại khi bấm Tính)")
+    
+    # Thay vì dùng biến thường, ta dùng key=... để liên kết với session_state
+    A_master = st.number_input("Tham số A (Max)", value=st.session_state.A_val, key='A_input', format="%.2f")
+    B_master = st.number_input("Tham số B (Slope)", value=st.session_state.B_val, key='B_input', format="%.6f")
+    C_master = st.number_input("Tham số C (IC50)", value=st.session_state.C_val, key='C_input', format="%.4f")
+    D_master = st.number_input("Tham số D (Min)", value=st.session_state.D_val, key='D_input', format="%.2f")
+    
+    # Cập nhật ngược lại vào session_state (để chắc chắn)
+    st.session_state.A_val = A_master
+    st.session_state.B_val = B_master
+    st.session_state.C_val = C_master
+    st.session_state.D_val = D_master
+
+# --- HÀM TOÁN HỌC ---
 def get_master_signal(conc):
     """Tính tín hiệu lý thuyết trên đường Master"""
     if conc < 0: return A_master
+    # Sử dụng trực tiếp biến A_master, B_master... vừa lấy từ input
     return D_master + (A_master - D_master) / (1.0 + (conc / C_master) ** B_master)
 
 def get_concentration(signal, slope, intercept):
-    """Tính nồng độ mẫu bệnh nhân từ tín hiệu đo được"""
-    # 1. Chuẩn hóa tín hiệu về thang đo Master
-    # Meas = Slope * Master + Int => Master = (Meas - Int) / Slope
+    """Tính nồng độ mẫu bệnh nhân"""
     sig_norm = (signal - intercept) / slope
-    
-    # 2. Giải phương trình 4PL ngược
-    # y = D + (A-D)/(1+(x/C)^B) => x = C * ((A-D)/(y-D) - 1)^(1/B)
     try:
         term1 = A_master - D_master
         term2 = sig_norm - D_master
@@ -42,7 +56,6 @@ col1, col2 = st.columns(2)
 
 with col1:
     st.markdown("### Level 1 (Cal 1)")
-    # Giá trị mặc định lấy từ ảnh của bạn
     c1_target = st.number_input("Target 1 (IU/mL)", value=42.1)
     c1_meas_1 = st.number_input("Signal 1 (Lần 1)", value=583602.0)
     c1_meas_2 = st.number_input("Signal 1 (Lần 2)", value=583843.0)
@@ -51,7 +64,6 @@ with col1:
 
 with col2:
     st.markdown("### Level 2 (Cal 2)")
-    # Giá trị mặc định lấy từ ảnh của bạn
     c2_target = st.number_input("Target 2 (IU/mL)", value=372.0)
     c2_meas_1 = st.number_input("Signal 2 (Lần 1)", value=289073.0)
     c2_meas_2 = st.number_input("Signal 2 (Lần 2)", value=287568.0)
@@ -66,7 +78,6 @@ if st.button("🚀 Thực hiện Recalibration", type="primary"):
     m_sig_2 = get_master_signal(c2_target)
     
     # B. Tính Slope & Intercept
-    # Hệ phương trình tuyến tính đi qua 2 điểm: (Master1, Meas1) và (Master2, Meas2)
     slope = (c2_avg - c1_avg) / (m_sig_2 - m_sig_1)
     intercept = c1_avg - slope * m_sig_1
     
@@ -79,35 +90,24 @@ if st.button("🚀 Thực hiện Recalibration", type="primary"):
         st.metric("Slope (Độ dốc)", f"{slope:.4f}")
         st.metric("Intercept (Chặn)", f"{intercept:,.2f}")
         
-        # Đánh giá (Tiêu chuẩn Roche thường là 0.8 - 1.2)
         if 0.8 <= slope <= 1.2:
             st.success("✅ CAL PASSED (Đạt chuẩn)")
         else:
             st.error("❌ CAL FAILED (Ngoài dải cho phép)")
             
-        st.markdown("---")
-        st.markdown("**Giải thích:**")
-        st.caption(f"Tín hiệu Master tại 42.1 IU/mL: {m_sig_1:,.0f}")
-        st.caption(f"Tín hiệu Master tại 372 IU/mL: {m_sig_2:,.0f}")
-        st.caption(f"Máy đang hoạt động ở mức **{slope*100:.1f}%** tín hiệu so với lúc xuất xưởng.")
+        st.caption(f"Tín hiệu Master tại {c1_target}: {m_sig_1:,.0f}")
+        st.caption(f"Tín hiệu Master tại {c2_target}: {m_sig_2:,.0f}")
 
     with res_col2:
         st.subheader("Biểu đồ Đường chuẩn")
         
-        # Vẽ đường cong
         x_plot = np.logspace(np.log10(5), np.log10(1000), 200)
-        
-        # 1. Đường Master Gốc
         y_master = [get_master_signal(x) for x in x_plot]
-        
-        # 2. Đường Thực tế (Recalibrated)
         y_recal = [val * slope + intercept for val in y_master]
         
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=x_plot, y=y_master, mode='lines', name='Master Curve (Nhà máy)', line=dict(dash='dash', color='gray')))
-        fig.add_trace(go.Scatter(x=x_plot, y=y_recal, mode='lines', name='Actual Curve (Hôm nay)', line=dict(color='blue')))
-        
-        # Điểm Cal
+        fig.add_trace(go.Scatter(x=x_plot, y=y_master, mode='lines', name='Master Curve (Gốc)', line=dict(dash='dash', color='gray')))
+        fig.add_trace(go.Scatter(x=x_plot, y=y_recal, mode='lines', name='Actual Curve (Hiện tại)', line=dict(color='blue')))
         fig.add_trace(go.Scatter(
             x=[c1_target, c2_target], y=[c1_avg, c2_avg],
             mode='markers', name='Điểm Cal Lab', marker=dict(size=12, color='red', symbol='cross')
@@ -121,19 +121,23 @@ if st.button("🚀 Thực hiện Recalibration", type="primary"):
         )
         st.plotly_chart(fig, use_container_width=True)
 
-    # --- 4. TÍNH MẪU THỬ ---
+    # --- 4. TÍNH MẪU THỬ (Lồng bên trong để dùng biến slope/intercept) ---
     st.divider()
     st.subheader("🧪 Thử tính mẫu bệnh nhân")
-    c_test_sig = st.number_input("Nhập Tín hiệu mẫu (Ví dụ: 400000)", value=400000.0)
     
-    if st.button("Tính kết quả mẫu"):
-        res = get_concentration(c_test_sig, slope, intercept)
-        st.success(f"Kết quả nồng độ: **{res:.4f} IU/mL**")
+    # Form giúp gom nhóm nhập liệu để trông gọn hơn
+    with st.form("sample_calc_form"):
+        c_test_sig = st.number_input("Nhập Tín hiệu mẫu (Ví dụ: 400000)", value=400000.0)
+        calc_submitted = st.form_submit_button("Tính kết quả mẫu")
         
-        # Vẽ điểm này lên đồ thị
-        fig.add_trace(go.Scatter(
-            x=[res], y=[c_test_sig],
-            mode='markers', name='Mẫu Bệnh Nhân', marker=dict(size=15, color='green', symbol='star')
-        ))
-        with res_col2:
-            st.plotly_chart(fig, use_container_width=True, key="update_chart")
+        if calc_submitted:
+            res = get_concentration(c_test_sig, slope, intercept)
+            st.success(f"Kết quả nồng độ: **{res:.4f} IU/mL**")
+            
+            # Vẽ thêm điểm này
+            fig.add_trace(go.Scatter(
+                x=[res], y=[c_test_sig],
+                mode='markers', name='Mẫu Bệnh Nhân', marker=dict(size=15, color='green', symbol='star')
+            ))
+            # Cần vẽ lại chart để hiện điểm mới
+            st.plotly_chart(fig, use_container_width=True, key="chart_updated")

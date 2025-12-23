@@ -1,164 +1,219 @@
 import streamlit as st
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
+import plotly.express as px
+from datetime import datetime
 
-st.set_page_config(page_title="ATPO Real Cal Check", layout="wide")
-st.title("🧪 Kiểm tra Cal ATPO (Dữ liệu thực tế)")
+# --- CẤU HÌNH TRANG ---
+st.set_page_config(page_title="Roche Cal Troubleshoot", layout="wide")
+st.title("📈 Roche Calibration Troubleshoot & Trend Analysis")
+st.markdown("Công cụ theo dõi lịch sử đường chuẩn, phát hiện xu hướng trôi (Drift) và đánh giá độ ổn định của hệ thống.")
 
-# --- 0. KHỞI TẠO SESSION STATE (QUAN TRỌNG) ---
-# Kiểm tra xem các biến này đã có trong bộ nhớ chưa, nếu chưa thì tạo mới
-if 'A_val' not in st.session_state: st.session_state.A_val = 876721.0
-if 'B_val' not in st.session_state: st.session_state.B_val = 0.762881
-if 'C_val' not in st.session_state: st.session_state.C_val = 175.289
-if 'D_val' not in st.session_state: st.session_state.D_val = -1315.11
-
-# --- 1. NHẬP THAM SỐ MASTER CURVE (CÓ LƯU TRẠNG THÁI) ---
-with st.sidebar:
-    st.header("Cấu hình Master Curve")
-    st.info("Nhập tham số từ XML/Barcode (Sẽ được lưu lại khi bấm Tính)")
-    
-    # Thay vì dùng biến thường, ta dùng key=... để liên kết với session_state
-    A_master = st.number_input("Tham số A (Max)", value=st.session_state.A_val, key='A_input', format="%.2f")
-    B_master = st.number_input("Tham số B (Slope)", value=st.session_state.B_val, key='B_input', format="%.6f")
-    C_master = st.number_input("Tham số C (IC50)", value=st.session_state.C_val, key='C_input', format="%.4f")
-    D_master = st.number_input("Tham số D (Min)", value=st.session_state.D_val, key='D_input', format="%.2f")
-    
-    # Cập nhật ngược lại vào session_state (để chắc chắn)
-    st.session_state.A_val = A_master
-    st.session_state.B_val = B_master
-    st.session_state.C_val = C_master
-    st.session_state.D_val = D_master
-
-# --- HÀM TOÁN HỌC ---
-def get_master_signal(conc):
-    """Tính tín hiệu lý thuyết trên đường Master"""
-    if conc < 0: return A_master
-    # Sử dụng trực tiếp biến A_master, B_master... vừa lấy từ input
-    return D_master + (A_master - D_master) / (1.0 + (conc / C_master) ** B_master)
-
-def get_concentration(signal, slope, intercept):
-    """Tính nồng độ mẫu bệnh nhân"""
-    sig_norm = (signal - intercept) / slope
-    try:
-        term1 = A_master - D_master
-        term2 = sig_norm - D_master
-        if term2 == 0: return np.nan
-        ratio = term1 / term2 - 1
-        if ratio <= 0: return np.nan
-        return C_master * (ratio ** (1/B_master))
-    except:
-        return np.nan
-
-# --- 2. GIAO DIỆN NHẬP KẾT QUẢ CAL (TỪ ẢNH) ---
-st.subheader("1. Dữ liệu Calibration (Từ màn hình Cobas)")
-
-col1, col2 = st.columns(2)
-
-with col1:
-    st.markdown("### Level 1 (Cal 1)")
-    c1_target = st.number_input("Target 1 (IU/mL)", value=42.1)
-    c1_meas_1 = st.number_input("Signal 1 (Lần 1)", value=583602.0)
-    c1_meas_2 = st.number_input("Signal 1 (Lần 2)", value=583843.0)
-    c1_avg = (c1_meas_1 + c1_meas_2) / 2
-    st.info(f"👉 Trung bình Signal 1: **{c1_avg:,.1f}**")
-
-with col2:
-    st.markdown("### Level 2 (Cal 2)")
-    c2_target = st.number_input("Target 2 (IU/mL)", value=372.0)
-    c2_meas_1 = st.number_input("Signal 2 (Lần 1)", value=289073.0)
-    c2_meas_2 = st.number_input("Signal 2 (Lần 2)", value=287568.0)
-    c2_avg = (c2_meas_1 + c2_meas_2) / 2
-    st.info(f"👉 Trung bình Signal 2: **{c2_avg:,.1f}**")
-
-# --- 3. XỬ LÝ TÍNH TOÁN & SO SÁNH ---
-
-# Khởi tạo state để lưu kết quả Cal nếu chưa có
-if 'cal_results' not in st.session_state:
-    st.session_state.cal_results = None # Sẽ lưu dict: {'slope': ..., 'intercept': ...}
-
-# Nút thực hiện Cal (Chỉ tính toán và lưu vào bộ nhớ)
-if st.button("🚀 Thực hiện Recalibration", type="primary"):
-    
-    # A. Tính tín hiệu Master lý thuyết
-    m_sig_1 = get_master_signal(c1_target)
-    m_sig_2 = get_master_signal(c2_target)
-    
-    # B. Tính Slope & Intercept
-    slope_val = (c2_avg - c1_avg) / (m_sig_2 - m_sig_1)
-    intercept_val = c1_avg - slope_val * m_sig_1
-    
-    # C. LƯU VÀO SESSION STATE (QUAN TRỌNG NHẤT)
-    st.session_state.cal_results = {
-        'slope': slope_val,
-        'intercept': intercept_val,
-        'm_sig_1': m_sig_1,
-        'm_sig_2': m_sig_2
+# --- 1. KHỞI TẠO SESSION STATE ---
+# Lưu tham số Master Curve
+if 'master_params' not in st.session_state:
+    # Mặc định theo ví dụ ATPO cũ của bạn
+    st.session_state.master_params = {
+        'A': 876721.0, 'B': 0.762881, 'C': 175.289, 'D': -1315.11
     }
-    st.success("Đã Recalibration thành công! Kết quả đã được lưu.")
 
-# --- 4. HIỂN THỊ KẾT QUẢ & BIỂU ĐỒ (LUÔN HIỂN THỊ NẾU ĐÃ CÓ KẾT QUẢ TRONG MEMORY) ---
-if st.session_state.cal_results is not None:
-    # Lấy dữ liệu từ bộ nhớ ra dùng
-    cal_data = st.session_state.cal_results
-    slope = cal_data['slope']
-    intercept = cal_data['intercept']
+# --- 2. HÀM TOÁN HỌC ---
+def get_master_signal(conc, A, B, C, D):
+    if conc < 0: return A
+    return D + (A - D) / (1.0 + (conc / C) ** B)
+
+# --- 3. SIDEBAR: THAM SỐ MASTER CURVE ---
+with st.sidebar:
+    st.header("1. Master Curve (Cố định)")
+    st.caption("Thông số từ XML/Barcode của Lô thuốc thử đang dùng.")
+    
+    m_A = st.number_input("A (Max/Dose 0)", value=st.session_state.master_params['A'], format="%.0f")
+    m_B = st.number_input("B (Slope)", value=st.session_state.master_params['B'], format="%.6f")
+    m_C = st.number_input("C (IC50)", value=st.session_state.master_params['C'], format="%.4f")
+    m_D = st.number_input("D (Min/Inf)", value=st.session_state.master_params['D'], format="%.0f")
+    
+    # Cập nhật lại session state nếu người dùng sửa
+    st.session_state.master_params = {'A': m_A, 'B': m_B, 'C': m_C, 'D': m_D}
     
     st.divider()
-    res_col1, res_col2 = st.columns([1, 2])
-    
-    with res_col1:
-        st.subheader("Kết quả Tính toán")
-        st.write("Thông số hiệu chuẩn:")
-        st.metric("Slope (Độ dốc)", f"{slope:.4f}")
-        st.metric("Intercept (Chặn)", f"{intercept:,.2f}")
-        
-        if 0.8 <= slope <= 1.2:
-            st.success("✅ CAL PASSED")
-        else:
-            st.error("❌ CAL FAILED")
+    st.info("""
+    **Hướng dẫn:**
+    1. Nhập tham số Master Curve.
+    2. Nhập lịch sử các lần Cal vào bảng bên phải.
+    3. Xem biểu đồ để phát hiện bất thường.
+    """)
 
-    with res_col2:
-        st.subheader("Biểu đồ Đường chuẩn")
-        # Vẽ biểu đồ (Code vẽ giữ nguyên, chỉ thay biến slope/intercept)
-        x_plot = np.logspace(np.log10(5), np.log10(1000), 200)
-        y_master = [get_master_signal(x) for x in x_plot]
-        y_recal = [val * slope + intercept for val in y_master]
-        
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=x_plot, y=y_master, mode='lines', name='Master Curve', line=dict(dash='dash', color='gray')))
-        fig.add_trace(go.Scatter(x=x_plot, y=y_recal, mode='lines', name='Actual Curve', line=dict(color='blue')))
-        # Vẽ điểm Cal thực tế
-        fig.add_trace(go.Scatter(
-            x=[c1_target, c2_target], y=[c1_avg, c2_avg],
-            mode='markers', name='Điểm Cal Lab', marker=dict(size=12, color='red', symbol='cross')
+# --- 4. GIAO DIỆN CHÍNH: NHẬP LIỆU HÀNG LOẠT ---
+st.subheader("2. Lịch sử Calibration (Data Entry)")
+
+# Tạo dữ liệu mẫu (Giả lập lịch sử Cal trong 1 tuần)
+# Logic: Tín hiệu giảm dần theo thời gian (Máy già/Thuốc thử hủy)
+default_history = pd.DataFrame([
+    {"Date": "2023-12-01", "Target L1": 42.1, "Target L2": 372.0, "Signal L1": 590000, "Signal L2": 295000, "Note": "Mới mở lọ"},
+    {"Date": "2023-12-08", "Target L1": 42.1, "Target L2": 372.0, "Signal L1": 585000, "Signal L2": 290000, "Note": ""},
+    {"Date": "2023-12-15", "Target L1": 42.1, "Target L2": 372.0, "Signal L1": 583602, "Signal L2": 289073, "Note": "Hiện tại"},
+    {"Date": "2023-12-22", "Target L1": 42.1, "Target L2": 372.0, "Signal L1": 550000, "Signal L2": 260000, "Note": "Dự báo lỗi"},
+])
+
+# Cho phép người dùng sửa bảng
+edited_df = st.data_editor(default_history, num_rows="dynamic", use_container_width=True)
+
+# Nút Phân tích
+if st.button("🔍 Phân tích Xu hướng (Analyze)", type="primary"):
+    
+    # --- 5. XỬ LÝ SỐ LIỆU ---
+    results = []
+    
+    # Lấy tham số Master
+    p = st.session_state.master_params
+    
+    for index, row in edited_df.iterrows():
+        try:
+            # Lấy dữ liệu dòng
+            date = row['Date']
+            t1, t2 = float(row['Target L1']), float(row['Target L2'])
+            s1, s2 = float(row['Signal L1']), float(row['Signal L2'])
+            
+            # Tính Master Signal
+            m1 = get_master_signal(t1, p['A'], p['B'], p['C'], p['D'])
+            m2 = get_master_signal(t2, p['A'], p['B'], p['C'], p['D'])
+            
+            # Tính Slope & Intercept
+            # Slope = (S2 - S1) / (M2 - M1)
+            slope = (s2 - s1) / (m2 - m1)
+            intercept = s1 - slope * m1
+            
+            # Đánh giá
+            status = "Pass"
+            if slope < 0.8 or slope > 1.2: status = "Fail"
+            
+            results.append({
+                "Date": date,
+                "Slope": slope,
+                "Intercept": intercept,
+                "Signal L1": s1,
+                "Signal L2": s2,
+                "Status": status,
+                "Target L1": t1, # Lưu để vẽ
+                "Target L2": t2  # Lưu để vẽ
+            })
+            
+        except Exception as e:
+            st.warning(f"Lỗi dữ liệu tại dòng {index}: {e}")
+
+    # Chuyển kết quả thành DataFrame
+    res_df = pd.DataFrame(results)
+
+    # --- 6. HIỂN THỊ DASHBOARD ---
+    st.divider()
+    st.header("3. Kết quả Chẩn đoán (Troubleshooting Dashboard)")
+    
+    # A. THẺ KPI TỔNG QUAN
+    kpi1, kpi2, kpi3 = st.columns(3)
+    latest = res_df.iloc[-1] # Lấy lần Cal mới nhất
+    
+    kpi1.metric("Lần Cal mới nhất", f"{latest['Date']}")
+    kpi2.metric("Hệ số Slope hiện tại", f"{latest['Slope']:.4f}", 
+                delta=f"{latest['Slope'] - 1.0:.2f} so với chuẩn", 
+                delta_color="inverse") # Slope càng xa 1 càng tệ
+    
+    status_color = "normal" if latest['Status'] == "Pass" else "off"
+    kpi3.metric("Trạng thái", latest['Status'])
+
+    # B. BIỂU ĐỒ 1: XU HƯỚNG SLOPE (QUAN TRỌNG NHẤT)
+    st.subheader("📊 Biểu đồ xu hướng hệ số Slope (Calibration Factor)")
+    st.caption("Đây là chỉ số quan trọng nhất. Nếu đường này đi xuống liên tục -> Thuốc thử hỏng hoặc Đèn già.")
+    
+    fig_trend = go.Figure()
+    
+    # Vùng an toàn (0.8 - 1.2)
+    fig_trend.add_hrect(y0=0.8, y1=1.2, line_width=0, fillcolor="green", opacity=0.1, annotation_text="Vùng An Toàn")
+    
+    # Đường Slope
+    fig_trend.add_trace(go.Scatter(
+        x=res_df['Date'], y=res_df['Slope'],
+        mode='lines+markers', name='Slope',
+        line=dict(color='blue', width=3),
+        marker=dict(size=10)
+    ))
+    
+    # Điểm Fail
+    fails = res_df[res_df['Status'] == 'Fail']
+    if not fails.empty:
+        fig_trend.add_trace(go.Scatter(
+            x=fails['Date'], y=fails['Slope'],
+            mode='markers', name='Failed Cal',
+            marker=dict(color='red', size=15, symbol='x')
         ))
-        fig.update_layout(xaxis_type="log", yaxis_type="log", height=450)
-        st.plotly_chart(fig, use_container_width=True)
 
-    # --- 5. TÍNH MẪU THỬ (NẰM TRONG KHỐI IF CỦA KẾT QUẢ ĐÃ LƯU) ---
-    st.divider()
-    st.subheader("🧪 Thử tính mẫu bệnh nhân")
+    fig_trend.update_layout(yaxis_title="Slope Factor", template="plotly_white", height=400)
+    st.plotly_chart(fig_trend, use_container_width=True)
+
+    # C. BIỂU ĐỒ 2: OVERLAY MASTER CURVE
+    st.subheader("📉 Kiểm tra độ lệch so với Master Curve")
+    col_chart_2, col_advice = st.columns([2, 1])
     
-    # Dùng Form để gom nhóm hành động nhập + bấm nút
-    with st.form("calc_form"):
-        c_test_sig = st.number_input("Nhập Tín hiệu mẫu (Ví dụ: 400000)", value=400000.0)
-        submit_btn = st.form_submit_button("Tính kết quả mẫu")
+    with col_chart_2:
+        # Vẽ Master Curve
+        x_draw = np.logspace(np.log10(5), np.log10(1000), 200)
+        y_master = [get_master_signal(x, p['A'], p['B'], p['C'], p['D']) for x in x_draw]
         
-        if submit_btn:
-            # Lúc này biến slope và intercept được lấy từ st.session_state.cal_results
-            # nên không bị mất đi dù trang web reload
-            res = get_concentration(c_test_sig, slope, intercept)
+        fig_overlay = go.Figure()
+        fig_overlay.add_trace(go.Scatter(x=x_draw, y=y_master, mode='lines', name='Master Curve (Gốc)', line=dict(dash='dash', color='gray')))
+        
+        # Vẽ các điểm Cal lịch sử
+        # Màu đậm nhạt theo thời gian (Cũ = Nhạt, Mới = Đậm)
+        for i, row in res_df.iterrows():
+            opacity = 0.3 + (0.7 * (i / len(res_df))) # Tăng dần độ đậm
+            name = f"Cal {row['Date']}" if i == len(res_df)-1 else None # Chỉ hiện tên cái cuối
             
-            st.info(f"👉 Kết quả nồng độ: **{res:.4f} IU/mL**")
-            
-            # Vẽ điểm mẫu lên biểu đồ
-            fig.add_trace(go.Scatter(
-                x=[res], y=[c_test_sig],
-                mode='markers', name='Mẫu Bệnh Nhân', marker=dict(size=15, color='green', symbol='star')
+            fig_overlay.add_trace(go.Scatter(
+                x=[row['Target L1'], row['Target L2']],
+                y=[row['Signal L1'], row['Signal L2']],
+                mode='lines+markers',
+                line=dict(color='blue', width=1),
+                opacity=opacity,
+                showlegend=False
             ))
-            # Cập nhật lại biểu đồ bên trên (dùng key để force redraw)
-            with res_col2:
-                st.plotly_chart(fig, use_container_width=True, key="final_chart_with_sample")
+            
+        # Highlight lần mới nhất
+        fig_overlay.add_trace(go.Scatter(
+            x=[latest['Target L1'], latest['Target L2']],
+            y=[latest['Signal L1'], latest['Signal L2']],
+            mode='markers', name='Lần Cal Mới Nhất',
+            marker=dict(color='red', size=12)
+        ))
 
-else:
-    st.info("👈 Vui lòng nhập thông số Cal và bấm 'Thực hiện Recalibration' trước.")
+        fig_overlay.update_layout(xaxis_type="log", yaxis_type="log", title="Độ tản mạn các lần Cal", height=450)
+        st.plotly_chart(fig_overlay, use_container_width=True)
+
+    # D. PHẦN CHẨN ĐOÁN (TROUBLESHOOTING ADVICE)
+    with col_advice:
+        st.info("💡 **Phân tích:**")
+        
+        # Logic phân tích đơn giản
+        slope_change = res_df['Slope'].max() - res_df['Slope'].min()
+        latest_slope = latest['Slope']
+        
+        if latest_slope < 0.8:
+            st.error("⛔ **LỖI CALIBRATION!** Slope < 0.8. Tín hiệu quá thấp.")
+            st.markdown("""
+            *Nguyên nhân khả thi:*
+            - Thuốc thử hết hạn hoặc để ngoài quá lâu.
+            - Kim hút mẫu bị tắc/nghẹt.
+            - Bóng đèn quang kế quá già (kiểm tra Photometer Check).
+            """)
+        elif latest_slope > 1.2:
+            st.error("⛔ **LỖI CALIBRATION!** Slope > 1.2. Tín hiệu quá cao.")
+            st.markdown("""
+            *Nguyên nhân khả thi:*
+            - Nhiễm chéo mẫu (Carry-over).
+            - Lỗi pha Calibrator (pha quá đặc).
+            - Bọt khí trong cuvet đo.
+            """)
+        else:
+            st.success("✅ **Hệ thống ỔN ĐỊNH.**")
+            
+        if slope_change > 0.15:
+            st.warning("⚠️ **Cảnh báo Trôi (Drift):** Hệ số Slope biến động mạnh (>15%) trong khoảng thời gian này. Hệ thống thiếu ổn định.")

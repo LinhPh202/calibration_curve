@@ -169,16 +169,27 @@ if app_mode == "1. Định lượng (Quantitative)":
             else:
                 k3.error("❌ FAIL") # Hiển thị Fail nhưng vẫn tiếp tục vẽ bên dưới
             
-            # --- VẼ BIỂU ĐỒ (LUÔN VẼ DÙ FAIL) ---
+            # --- VẼ BIỂU ĐỒ (CẬP NHẬT RANGE TỰ ĐỘNG) ---
             st.subheader("2. Biểu đồ Recalibration")
-            x_plot = np.logspace(np.log10(5), np.log10(1000), 200)
+            
+            # Tự động tìm Min/Max để vẽ cho đẹp
+            # Lấy min của target, chia 5 để có khoảng hở bên trái
+            min_x = min(res['t1'], res['t2']) / 5 
+            if min_x <= 0: min_x = 0.01 # Tránh lỗi log(0)
+            
+            # Lấy max của target, nhân 5 để có khoảng hở bên phải
+            max_x = max(res['t1'], res['t2']) * 5
+            
+            # Tạo dải X mới dựa trên dữ liệu thật
+            x_plot = np.logspace(np.log10(min_x), np.log10(max_x), 200)
+            
             y_master = [rod_4pl(x, **p) for x in x_plot]
             y_recal = [y * res['slope'] + res['intercept'] for y in y_master]
             
             fig = go.Figure()
             # Master Curve
             fig.add_trace(go.Scatter(x=x_plot, y=y_master, mode='lines', name='Master (Gốc)', line=dict(dash='dash', color='gray')))
-            # Actual Curve (Màu đỏ nếu Fail, Xanh nếu Pass)
+            # Actual Curve
             line_color = 'blue' if is_pass else 'red'
             line_name = 'Hiện tại (OK)' if is_pass else 'Hiện tại (FAIL)'
             fig.add_trace(go.Scatter(x=x_plot, y=y_recal, mode='lines', name=line_name, line=dict(color=line_color, width=3)))

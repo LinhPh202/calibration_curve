@@ -408,6 +408,7 @@ elif app_mode == "3. Troubleshoot (Trend Analysis)":
             
             fig.update_layout(title="Trực quan hóa biến dạng hình học", xaxis_type="log", yaxis_type="log", height=450)
             st.plotly_chart(fig, use_container_width=True)
+
 # ==============================================================================
 # MODE 4: SINH HÓA (PHOTOMETRIC)
 # ==============================================================================

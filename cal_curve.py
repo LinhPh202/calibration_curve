@@ -304,10 +304,14 @@ elif app_mode == "2. Định tính (Qualitative)":
 # MODE 3: TROUBLESHOOT (LỊCH SỬ & MÔ PHỎNG)
 # ==============================================================================
 elif app_mode == "3. Troubleshoot (Lịch sử)":
-    st.title("📈 Phân tích Xu hướng & Mô phỏng Tác động")
+    st.title("📈 Phân tích Xu hướng & Mô phỏng")
     st.markdown("Theo dõi biến động Slope và đánh giá tác động lên kết quả bệnh nhân.")
     
-    # Dữ liệu mẫu
+    # 1. KHỞI TẠO STATE CHO MODE 3 (Để không bị mất khi bấm nút tính)
+    if 'history_analysis' not in st.session_state:
+        st.session_state.history_analysis = None
+
+    # 2. DỮ LIỆU ĐẦU VÀO
     df_sample = pd.DataFrame([
         {"Date": "2023-12-01", "Target 1": 0.592, "Target 2": 19.0, "Signal 1": 4428, "Signal 2": 115877},
         {"Date": "2023-12-15", "Target 1": 0.592, "Target 2": 19.0, "Signal 1": 7336, "Signal 2": 117647},
@@ -315,12 +319,12 @@ elif app_mode == "3. Troubleshoot (Lịch sử)":
     ])
     
     st.subheader("1. Dữ liệu Lịch sử Cal")
+    # data_editor tự giữ trạng thái nên không lo mất dữ liệu nhập
     edited_df = st.data_editor(df_sample, num_rows="dynamic", use_container_width=True)
     
-    if st.button("🔍 Phân tích & Mô phỏng", type="primary"):
+    # 3. NÚT PHÂN TÍCH (Chỉ làm nhiệm vụ TÍNH và LƯU vào State)
+    if st.button("🔍 Phân tích dữ liệu", type="primary"):
         p = st.session_state.master_params
-        
-        # 1. TÍNH TOÁN SLOPE LỊCH SỬ
         analysis_results = []
         global_min, global_max = 99999, 0
         
@@ -345,115 +349,116 @@ elif app_mode == "3. Troubleshoot (Lịch sử)":
                         'T1': t1, 'T2': t2, 'S1': s1, 'S2': s2
                     })
             except: pass
-            
-        res_df = pd.DataFrame(analysis_results)
         
-        if not res_df.empty:
-            st.divider()
-            
-            # --- 2. BIỂU ĐỒ TREND & OVERLAY (Giữ nguyên như cũ) ---
-            col_trend, col_overlay = st.columns(2)
-            with col_trend:
-                st.subheader("A. Xu hướng Slope")
-                fig_trend = go.Figure()
-                fig_trend.add_hrect(y0=0.8, y1=1.2, fillcolor="green", opacity=0.1, line_width=0)
-                fig_trend.add_trace(go.Scatter(x=res_df['Date'], y=res_df['Slope'], mode='lines+markers+text', text=[f"{s:.2f}" for s in res_df['Slope']], textposition="top center", name='Slope'))
-                fig_trend.update_layout(yaxis_title="Slope Factor", height=400)
-                st.plotly_chart(fig_trend, use_container_width=True)
+        # LƯU KẾT QUẢ VÀO SESSION STATE (QUAN TRỌNG)
+        if analysis_results:
+            st.session_state.history_analysis = {
+                'results': analysis_results,
+                'min_x': global_min,
+                'max_x': global_max
+            }
+            st.success("Đã phân tích xong! Kéo xuống để xem kết quả.")
+        else:
+            st.error("Không có dữ liệu hợp lệ.")
 
-            with col_overlay:
-                st.subheader("B. Overlay Đường cong")
-                fig_overlay = go.Figure()
-                x_start = global_min / 5 if global_min > 0 else 0.01
-                x_end = global_max * 5
-                x_plot = np.logspace(np.log10(x_start), np.log10(x_end), 200)
-                
-                # Master
-                y_m_base = [rod_4pl(x, **p) for x in x_plot]
-                fig_overlay.add_trace(go.Scatter(x=x_plot, y=y_m_base, mode='lines', name='MASTER', line=dict(color='black', dash='dash'), opacity=0.5))
-                
-                # History Curves
-                for r in analysis_results:
-                    y_act = [y * r['Slope'] + r['Intercept'] for y in y_m_base]
-                    fig_overlay.add_trace(go.Scatter(x=x_plot, y=y_act, mode='lines', name=f"{r['Date']} (S:{r['Slope']:.2f})"))
-                
-                fig_overlay.update_layout(xaxis_type="log", yaxis_type="log", height=400, xaxis_title="Log Conc", yaxis_title="Log Signal")
-                st.plotly_chart(fig_overlay, use_container_width=True)
+    # 4. HIỂN THỊ KẾT QUẢ (Luôn hiển thị nếu State đã có dữ liệu)
+    if st.session_state.history_analysis is not None:
+        data = st.session_state.history_analysis
+        res_list = data['results']
+        res_df = pd.DataFrame(res_list)
+        p = st.session_state.master_params
+        
+        st.divider()
+        
+        # --- A. BIỂU ĐỒ ---
+        col_trend, col_overlay = st.columns(2)
+        with col_trend:
+            st.subheader("A. Xu hướng Slope")
+            fig_trend = go.Figure()
+            fig_trend.add_hrect(y0=0.8, y1=1.2, fillcolor="green", opacity=0.1, line_width=0)
+            fig_trend.add_trace(go.Scatter(x=res_df['Date'], y=res_df['Slope'], mode='lines+markers+text', text=[f"{s:.2f}" for s in res_df['Slope']], textposition="top center", name='Slope'))
+            fig_trend.update_layout(yaxis_title="Slope Factor", height=400)
+            st.plotly_chart(fig_trend, use_container_width=True)
 
-            # --- 3. MÔ PHỎNG TÁC ĐỘNG (TÍNH NĂNG MỚI BẠN YÊU CẦU) ---
-            st.divider()
-            st.subheader("C. Mô phỏng & Chuyển đổi (Simulation)")
-            st.markdown("Giả lập: Nếu chạy cùng một mẫu vào các ngày khác nhau, kết quả sẽ thay đổi thế nào?")
+        with col_overlay:
+            st.subheader("B. Overlay Đường cong")
+            fig_overlay = go.Figure()
+            x_start = data['min_x'] / 5 if data['min_x'] > 0 else 0.01
+            x_end = data['max_x'] * 5
+            x_plot = np.logspace(np.log10(x_start), np.log10(x_end), 200)
             
-            sim_col1, sim_col2 = st.columns([1, 2])
+            # Master
+            y_m_base = [rod_4pl(x, **p) for x in x_plot]
+            fig_overlay.add_trace(go.Scatter(x=x_plot, y=y_m_base, mode='lines', name='MASTER', line=dict(color='black', dash='dash'), opacity=0.5))
             
-            with sim_col1:
-                sim_mode = st.radio("Chọn hướng tính:", ["Signal ➔ Result", "Result ➔ Signal"], horizontal=True)
+            # History Curves
+            for r in res_list:
+                y_act = [y * r['Slope'] + r['Intercept'] for y in y_m_base]
+                fig_overlay.add_trace(go.Scatter(x=x_plot, y=y_act, mode='lines', name=f"{r['Date']} (S:{r['Slope']:.2f})"))
+            
+            fig_overlay.update_layout(xaxis_type="log", yaxis_type="log", height=400, xaxis_title="Log Conc", yaxis_title="Log Signal")
+            st.plotly_chart(fig_overlay, use_container_width=True)
+
+        # --- B. MÔ PHỎNG TÁC ĐỘNG (Phần này sẽ KHÔNG bị reset nữa) ---
+        st.divider()
+        st.subheader("C. Mô phỏng & Chuyển đổi")
+        st.markdown("Nhập giá trị để xem sự biến động kết quả qua các ngày.")
+        
+        sim_col1, sim_col2 = st.columns([1, 2])
+        
+        with sim_col1:
+            # Dùng Form để gom nhóm input
+            with st.form("sim_form"):
+                sim_mode = st.radio("Chọn hướng:", ["Signal ➔ Result", "Result ➔ Signal"])
+                sim_val = st.number_input("Nhập giá trị:", value=100000.0 if sim_mode == "Signal ➔ Result" else 5.0)
                 
-                sim_input_val = 0.0
-                if sim_mode == "Signal ➔ Result":
-                    sim_input_val = st.number_input("Nhập Signal cố định (Ví dụ QC):", value=100000.0)
-                    input_label = "Signal Input"
-                    output_label = "Result Output"
-                else:
-                    sim_input_val = st.number_input("Nhập Result cố định (Ví dụ 5.0):", value=5.0)
-                    input_label = "Result Input"
-                    output_label = "Signal Output"
-            
-            with sim_col2:
-                # Thực hiện tính toán hàng loạt cho tất cả các ngày
-                sim_results = []
+                # Nút tính nằm trong form
+                calc_btn = st.form_submit_button("⚡ Tính toán")
+        
+        with sim_col2:
+            if calc_btn: # Khi bấm nút này, code chạy lại nhưng history_analysis vẫn còn trong session_state
+                sim_res_list = []
+                input_lbl = "Signal" if sim_mode == "Signal ➔ Result" else "Result"
+                output_lbl = "Result" if sim_mode == "Signal ➔ Result" else "Signal"
                 
-                for r in analysis_results:
-                    val_out = np.nan
-                    
+                for r in res_list:
+                    out_val = np.nan
                     if sim_mode == "Signal ➔ Result":
-                        # Signal -> Norm -> Result
-                        norm = (sim_input_val - r['Intercept']) / r['Slope']
-                        val_out = inv_rod_4pl(norm, **p)
+                        norm = (sim_val - r['Intercept']) / r['Slope']
+                        out_val = inv_rod_4pl(norm, **p)
                     else:
-                        # Result -> Master Sig -> Raw Sig
-                        m_sig = rod_4pl(sim_input_val, **p)
-                        val_out = m_sig * r['Slope'] + r['Intercept']
+                        m_sig = rod_4pl(sim_val, **p)
+                        out_val = m_sig * r['Slope'] + r['Intercept']
                     
-                    sim_results.append({
+                    sim_res_list.append({
                         "Date": r['Date'],
                         "Slope": r['Slope'],
-                        input_label: sim_input_val,
-                        output_label: val_out
+                        output_lbl: out_val
                     })
                 
-                # Hiển thị bảng kết quả
-                df_sim = pd.DataFrame(sim_results)
-                
-                # Format hiển thị cho đẹp
+                # Hiển thị kết quả
+                df_sim = pd.DataFrame(sim_res_list)
                 st.dataframe(df_sim.style.format({
                     "Slope": "{:.4f}",
-                    output_label: "{:.4f}" if sim_mode == "Signal ➔ Result" else "{:,.0f}"
+                    output_lbl: "{:.4f}" if sim_mode == "Signal ➔ Result" else "{:,.0f}"
                 }), use_container_width=True)
                 
-                # Vẽ biểu đồ biến động kết quả
-                if not df_sim[output_label].isna().all():
+                # Vẽ biểu đồ biến động
+                if not df_sim[output_lbl].isna().all():
                     fig_sim = go.Figure()
                     fig_sim.add_trace(go.Scatter(
-                        x=df_sim['Date'], y=df_sim[output_label],
+                        x=df_sim['Date'], y=df_sim[output_lbl],
                         mode='lines+markers+text',
-                        text=[f"{v:.2f}" if sim_mode == "Signal ➔ Result" else f"{v:.0f}" for v in df_sim[output_label]],
+                        text=[f"{v:.2f}" if sim_mode == "Signal ➔ Result" else f"{v:.0f}" for v in df_sim[output_lbl]],
                         textposition="top center",
-                        name='Simulated Value',
-                        line=dict(color='orange', width=3, dash='dot')
+                        line=dict(color='orange', width=2, dash='dot')
                     ))
                     
-                    # Tính % biến thiên (CV%)
-                    vals = df_sim[output_label].dropna()
+                    # Tính CV%
+                    vals = df_sim[output_lbl].dropna()
                     if len(vals) > 0:
-                        avg = np.mean(vals)
-                        cv = (np.std(vals) / avg) * 100
-                        title_chart = f"Biến động {output_label} theo thời gian (CV%: {cv:.2f}%)"
-                    else:
-                        title_chart = "Biến động kết quả"
+                        cv = (np.std(vals) / np.mean(vals)) * 100
+                        st.caption(f"Độ biến thiên (CV%): **{cv:.2f}%**")
                         
-                    fig_sim.update_layout(title=title_chart, height=350, yaxis_title=output_label)
+                    fig_sim.update_layout(title=f"Biến động {output_lbl}", height=300)
                     st.plotly_chart(fig_sim, use_container_width=True)
-        else:
-            st.warning("Không có dữ liệu hợp lệ để phân tích.")

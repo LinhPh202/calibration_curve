@@ -249,7 +249,10 @@ if app_mode == "1. Định lượng (Immuno 4PL)":
             k1, k2, k3 = st.columns(3)
             k1.metric("Slope", f"{res['slope']:.4f}")
             k2.metric("Intercept", f"{res['intercept']:.0f}")
-            k3.success("PASS") if 0.8 <= res['slope'] <= 1.2 else k3.error("FAIL")
+            if 0.8 <= res['slope'] <= 1.2:
+    k3.success("PASS")
+else:
+    k3.error("FAIL")
             
             # Chart
             min_x = min(res['t1'], res['t2']) / 5 if min(res['t1'], res['t2']) > 0 else 0.01

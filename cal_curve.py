@@ -51,7 +51,7 @@ def inv_rod_4pl(y, A, B, C, D):
         return C * (term ** (1/B))
     except: return np.nan
 
-# [cite_start]--- SINH HÓA (LINEAR & LINE GRAPH) --- [cite: 317, 318, 354, 475]
+# --- SINH HÓA (LINEAR & LINE GRAPH) ---
 def calc_k_factor(conc_std, conc_blank, abs_std, abs_blank):
     # K = (Cn - Cb) / (An - Ab)
     if (abs_std - abs_blank) == 0: return 0
@@ -62,7 +62,7 @@ def calc_linear_conc(abs_sample, k_factor, abs_blank, conc_blank):
     return k_factor * (abs_sample - abs_blank) + conc_blank
 
 def calc_line_graph(abs_sample, cal_points):
-    # [cite_start]Linear Interpolation between points [cite: 833, 881]
+    # Linear Interpolation between points
     points = sorted(cal_points, key=lambda k: k['abs'])
     
     # Ngoại suy
@@ -91,7 +91,7 @@ def parse_roche_xml(uploaded_file):
         
         # Lấy thông tin Header
         module_type = "Unknown"
-        header = root.find("ModuleParameterDataFileHeader") #
+        header = root.find("ModuleParameterDataFileHeader") 
         if header is not None:
             module_type = header.get("ModuleType", "Unknown")
         elif "e801" in root.tag:
@@ -249,10 +249,12 @@ if app_mode == "1. Định lượng (Immuno 4PL)":
             k1, k2, k3 = st.columns(3)
             k1.metric("Slope", f"{res['slope']:.4f}")
             k2.metric("Intercept", f"{res['intercept']:.0f}")
+            
+            # --- FIX HIỂN THỊ (QUAN TRỌNG) ---
             if 0.8 <= res['slope'] <= 1.2:
-    k3.success("PASS")
-else:
-    k3.error("FAIL")
+                k3.success("PASS")
+            else:
+                k3.error("FAIL")
             
             # Chart
             min_x = min(res['t1'], res['t2']) / 5 if min(res['t1'], res['t2']) > 0 else 0.01
@@ -335,7 +337,7 @@ elif app_mode == "3. Troubleshoot (Trend Analysis)":
         t1 = st.number_input("Target 1", value=42.1)
         s1 = st.number_input("Signal 1 (Đo được)", value=583722.0)
         t2 = st.number_input("Target 2", value=372.0)
-        s2 = st.number_input("Signal 2 (Đo được)", value=288320.0) # Thử đổi số này để test các case
+        s2 = st.number_input("Signal 2 (Đo được)", value=288320.0) 
         
     with col_in2:
         st.subheader("Phân tích Hình dạng (Shape Diagnosis)")
@@ -359,21 +361,18 @@ elif app_mode == "3. Troubleshoot (Trend Analysis)":
             advice = "Hệ thống ổn định."
             
             # Case 1: Cắt chéo (Nguy hiểm) - Lệch ngược chiều nhau
-            # Ví dụ: Cal 1 tăng 10% nhưng Cal 2 lại giảm 10%
             if (dev1 * dev2 < 0) and (abs(dev1 - dev2) > 10): 
                 shape_type = "❌ MÉO MÓ / CẮT CHÉO (Distortion)"
                 color = "red"
                 advice = "Cảnh báo: Đường thực tế cắt chéo Master. Có thể do thao tác sai (bọt khí, lẫn lộn mẫu) ở một trong hai lọ Cal."
             
             # Case 2: Tịnh tiến (Song song) - Lệch cùng chiều và xấp xỉ nhau
-            # Ví dụ: Cả 2 đều tăng khoảng 20%
             elif abs(dev1 - dev2) < 5 and abs(dev1) > 10:
                 shape_type = "⚠️ TỊNH TIẾN (Parallel Shift)"
                 color = "orange"
                 advice = "Cảnh báo: Tín hiệu bị nâng/hạ nền đều nhau. Kiểm tra: Nước rửa, Cuvette, Nhiễm bẩn hệ thống."
             
             # Case 3: Xoay trục (Rotation) - Cal 1 chuẩn, Cal 2 lệch nhiều
-            # Ví dụ: Cal 1 lệch 2%, Cal 2 lệch 15%
             elif abs(dev1) < 5 and abs(dev2) > 10:
                 if slope < 1:
                     shape_type = "📉 XOAY XUỐNG (Drift Down)"

@@ -5,14 +5,16 @@ import plotly.graph_objects as go
 import xml.etree.ElementTree as ET
 
 # --- CẤU HÌNH TRANG ---
-st.set_page_config(page_title="Roche Cal Expert Ultra", layout="wide", page_icon="🧪")
+st.set_page_config(page_title="Roche Cal Expert Ultra", layout="wide", page_icon="🧬")
 
 # ==============================================================================
-# 1. QUẢN LÝ SESSION STATE
+# 1. QUẢN LÝ SESSION STATE & KHỞI TẠO DỮ LIỆU
 # ==============================================================================
+# A. Tham số Master Curve (Định lượng - Miễn dịch)
 if 'master_params' not in st.session_state:
     st.session_state.master_params = {'A': 876721.0, 'B': 0.762881, 'C': 175.289, 'D': -1315.11}
 
+# B. Tham số Cutoff (Định tính - Miễn dịch)
 if 'qual_params' not in st.session_state:
     st.session_state.qual_params = {
         'FNeg': 1.0, 'FPos': 0.65, 'Const': 0.0,
@@ -21,20 +23,27 @@ if 'qual_params' not in st.session_state:
         'MinDiff': 16000.0
     }
 
+# C. Tham số Tham chiếu Sinh hóa (Từ XML)
+if 'chem_ref_params' not in st.session_state:
+    st.session_state.chem_ref_params = None
+
+# D. Lưu kết quả tính toán
 if 'quant_results' not in st.session_state: st.session_state.quant_results = None
 if 'qual_results' not in st.session_state: st.session_state.qual_results = None
+if 'history_analysis' not in st.session_state: st.session_state.history_analysis = None
+if 'chem_linear_res' not in st.session_state: st.session_state.chem_linear_res = None
+if 'chem_multipoint' not in st.session_state: st.session_state.chem_multipoint = None
 
 # ==============================================================================
-# 2. HÀM TOÁN HỌC & XỬ LÝ XML
+# 2. HÀM TOÁN HỌC CỐT LÕI
 # ==============================================================================
+# --- MIỄN DỊCH (4PL) ---
 def rod_4pl(x, A, B, C, D):
-    """Tính Tín hiệu từ Nồng độ"""
     if x < 0: return A
     try: return D + (A - D) / (1.0 + (x / C) ** B)
     except: return np.nan
 
 def inv_rod_4pl(y, A, B, C, D):
-    """Tính Nồng độ từ Tín hiệu"""
     try:
         if (A - D) == 0 or (y - D) == 0: return np.nan
         term = (A - D) / (y - D) - 1
@@ -42,423 +51,410 @@ def inv_rod_4pl(y, A, B, C, D):
         return C * (term ** (1/B))
     except: return np.nan
 
+# [cite_start]--- SINH HÓA (LINEAR & LINE GRAPH) --- [cite: 317, 318, 354, 475]
+def calc_k_factor(conc_std, conc_blank, abs_std, abs_blank):
+    # K = (Cn - Cb) / (An - Ab)
+    if (abs_std - abs_blank) == 0: return 0
+    return (conc_std - conc_blank) / (abs_std - abs_blank)
+
+def calc_linear_conc(abs_sample, k_factor, abs_blank, conc_blank):
+    # Cx = K * (Ax - Ab) + Cb
+    return k_factor * (abs_sample - abs_blank) + conc_blank
+
+def calc_line_graph(abs_sample, cal_points):
+    # [cite_start]Linear Interpolation between points [cite: 833, 881]
+    points = sorted(cal_points, key=lambda k: k['abs'])
+    
+    # Ngoại suy
+    if abs_sample <= points[0]['abs']:
+        p1, p2 = points[0], points[1]
+    elif abs_sample >= points[-1]['abs']:
+        p1, p2 = points[-2], points[-1]
+    else:
+        # Nội suy
+        for i in range(len(points) - 1):
+            if points[i]['abs'] <= abs_sample <= points[i+1]['abs']:
+                p1, p2 = points[i], points[i+1]
+                break
+    
+    if (p2['abs'] - p1['abs']) == 0: return 0
+    k_interval = (p2['conc'] - p1['conc']) / (p2['abs'] - p1['abs'])
+    return k_interval * (abs_sample - p1['abs']) + p1['conc']
+
+# ==============================================================================
+# 3. XỬ LÝ XML (Parser Đa Năng)
+# ==============================================================================
 def parse_roche_xml(uploaded_file):
     try:
         tree = ET.parse(uploaded_file)
         root = tree.getroot()
+        
+        # Lấy thông tin Header
+        module_type = "Unknown"
+        header = root.find("ModuleParameterDataFileHeader") #
+        if header is not None:
+            module_type = header.get("ModuleType", "Unknown")
+        elif "e801" in root.tag:
+            module_type = "e801"
+            
         test_name = "Unknown"
-        for child in root.iter():
-            if 'ContainerNameShort' in child.attrib:
-                test_name = child.attrib['ContainerNameShort']
-                break
         
-        quant_tag = None
-        for child in root.iter():
-            if 'RodbardCurveParameters' in child.attrib:
-                quant_tag = child
-                break
-        
-        qual_tag = None
-        for child in root.iter():
-            if 'CutoffFNeg' in child.attrib:
-                qual_tag = child
-                break
-        return test_name, quant_tag, qual_tag
+        # --- CASE A: MIỄN DỊCH (e801/Elecsys) ---
+        if "e801" in module_type or "e801" in root.tag:
+            for child in root.iter():
+                if 'ContainerNameShort' in child.attrib:
+                    test_name = child.attrib['ContainerNameShort']
+            
+            # 1. Định lượng 4PL
+            quant_tag = None
+            for child in root.iter():
+                if 'RodbardCurveParameters' in child.attrib:
+                    quant_tag = child
+                    break
+            
+            if quant_tag is not None:
+                p_str = quant_tag.attrib['RodbardCurveParameters']
+                p_vals = [float(x) for x in p_str.split()]
+                return {"type": "immuno_quant", "name": test_name, "params": {'A': p_vals[0], 'C': p_vals[1], 'B': p_vals[2], 'D': p_vals[3]}}
+
+            # 2. Định tính Cutoff
+            qual_tag = None
+            for child in root.iter():
+                if 'CutoffFNeg' in child.attrib:
+                    qual_tag = child
+                    break
+            
+            if qual_tag is not None:
+                attr = qual_tag.attrib
+                return {
+                    "type": "immuno_qual", "name": test_name,
+                    "params": {
+                        'FNeg': float(attr.get('CutoffFNeg', 1)),
+                        'FPos': float(attr.get('CutoffFPos', 0.65)),
+                        'Const': float(attr.get('CutoffC', 0)),
+                        'MinNeg': float(attr.get('MinSignalNegativeCalibration', 0)),
+                        'MaxNeg': float(attr.get('MaxSignalNegativeCalibration', 99999)),
+                        'MinPos': float(attr.get('MinSignalPositiveCalibration', 0)),
+                        'MaxPos': float(attr.get('MaxSignalPositiveCalibration', 999999)),
+                        'MinDiff': float(attr.get('MinAcceptableCalibratorSignalDifference', 0))
+                    }
+                }
+
+        # --- CASE B: SINH HÓA (c501/c503 - CreJ, etc.) ---
+        elif root.tag == "ReagentContainerParameter":
+            reagent_details = root.find(".//ContainerReagentDetails")
+            if reagent_details is not None:
+                test_name = f"AppCode {reagent_details.get('ApplicationCode')}"
+            
+            # Tìm cặp SxLot (Signal) và CxLot (Concentration)
+            pairs = []
+            for pair in root.iter("ContainerReagentPair"):
+                sx = float(pair.get("SxLot"))
+                cx = float(pair.get("CxLot"))
+                pairs.append({"conc": cx, "abs": sx})
+            
+            pairs.sort(key=lambda x: x['conc'])
+            return {"type": "chem_linear", "name": test_name, "points": pairs}
+
+        return None
     except Exception as e:
-        st.error(f"Lỗi đọc file XML: {e}")
-        return None, None, None
+        st.error(f"Lỗi đọc XML: {e}")
+        return None
 
 # ==============================================================================
-# 3. SIDEBAR
+# 4. GIAO DIỆN CHÍNH (SIDEBAR)
 # ==============================================================================
 with st.sidebar:
     st.title("🎛️ Control Panel")
     
-    # IMPORT XML
-    st.markdown("### 📂 Import Parameter File")
+    st.markdown("### 📂 Nhập File Tham Số")
     uploaded_file = st.file_uploader("Upload Roche XML", type=['xml'])
     
     if uploaded_file is not None:
-        name, quant_data, qual_data = parse_roche_xml(uploaded_file)
-        if name:
-            st.success(f"Đã tải xét nghiệm: **{name}**")
-            if quant_data is not None:
-                p_str = quant_data.attrib['RodbardCurveParameters']
-                p_vals = [float(x) for x in p_str.split()]
-                st.session_state.master_params = {'A': p_vals[0], 'C': p_vals[1], 'B': p_vals[2], 'D': p_vals[3]}
-                st.toast("Đã cập nhật tham số Master Curve (4PL)", icon="✅")
-            if qual_data is not None:
-                attr = qual_data.attrib
-                st.session_state.qual_params = {
-                    'FNeg': float(attr.get('CutoffFNeg', 1)),
-                    'FPos': float(attr.get('CutoffFPos', 0.65)),
-                    'Const': float(attr.get('CutoffC', 0)),
-                    'MinNeg': float(attr.get('MinSignalNegativeCalibration', 0)),
-                    'MaxNeg': float(attr.get('MaxSignalNegativeCalibration', 99999)),
-                    'MinPos': float(attr.get('MinSignalPositiveCalibration', 0)),
-                    'MaxPos': float(attr.get('MaxSignalPositiveCalibration', 999999)),
-                    'MinDiff': float(attr.get('MinAcceptableCalibratorSignalDifference', 0))
-                }
-                st.toast("Đã cập nhật tham số Cutoff", icon="✅")
+        parsed = parse_roche_xml(uploaded_file)
+        if parsed:
+            st.success(f"Đã nhận diện: **{parsed['name']}**")
+            
+            if parsed['type'] == 'immuno_quant':
+                st.session_state.master_params = parsed['params']
+                st.toast("Đã cập nhật 4PL Parameters", icon="✅")
+                
+            elif parsed['type'] == 'immuno_qual':
+                st.session_state.qual_params = parsed['params']
+                st.toast("Đã cập nhật Cutoff Parameters", icon="✅")
+                
+            elif parsed['type'] == 'chem_linear':
+                st.session_state.chem_ref_params = parsed
+                pts = parsed['points']
+                if len(pts) >= 2:
+                    # Tính K Factory Reference
+                    k_ref = calc_k_factor(pts[1]['conc'], pts[0]['conc'], pts[1]['abs'], pts[0]['abs']) if (pts[1]['abs'] - pts[0]['abs']) != 0 else 0
+                    st.session_state.chem_ref_params['k_ref'] = k_ref
+                st.toast("Đã cập nhật Biochem Reference", icon="✅")
+
+    st.divider()
+    app_mode = st.radio("Chọn Chế độ:", 
+                        ["1. Định lượng (Immuno 4PL)", 
+                         "2. Định tính (Immuno Cutoff)", 
+                         "3. Troubleshoot (Trend Analysis)",
+                         "4. Sinh hóa (Photometric)"])
     
     st.divider()
-    app_mode = st.radio("Chọn Chức năng:", ["1. Định lượng (Quantitative)", "2. Định tính (Qualitative)", "3. Troubleshoot (Lịch sử)"])
-    st.divider()
     
-    # MANUAL EDIT
-    if app_mode == "1. Định lượng (Quantitative)" or app_mode == "3. Troubleshoot (Lịch sử)":
-        st.subheader("⚙️ Master Curve (4PL)")
+    # Hiển thị tham số hiện tại để sửa tay
+    if app_mode in ["1. Định lượng (Immuno 4PL)", "3. Troubleshoot (Trend Analysis)"]:
+        st.caption("⚙️ Master Curve (4PL)")
         p = st.session_state.master_params
-        mA = st.number_input("A", value=p['A'], format="%.0f")
-        mB = st.number_input("B", value=p['B'], format="%.6f")
-        mC = st.number_input("C", value=p['C'], format="%.4f")
-        mD = st.number_input("D", value=p['D'], format="%.0f")
-        st.session_state.master_params.update({'A': mA, 'B': mB, 'C': mC, 'D': mD})
-    elif app_mode == "2. Định tính (Qualitative)":
-        st.subheader("⚙️ Cutoff Params")
+        for k in ['A', 'B', 'C', 'D']:
+            st.session_state.master_params[k] = st.number_input(k, value=p[k], format="%.6f" if k=='B' else "%.2f")
+            
+    elif app_mode == "2. Định tính (Immuno Cutoff)":
+        st.caption("⚙️ Cutoff Params")
         qp = st.session_state.qual_params
-        q_FNeg = st.number_input("Fac Neg", value=qp['FNeg'])
-        q_FPos = st.number_input("Fac Pos", value=qp['FPos'])
-        q_Const = st.number_input("Const", value=qp['Const'])
-        st.session_state.qual_params.update({'FNeg': q_FNeg, 'FPos': q_FPos, 'Const': q_Const})
+        for k in ['FNeg', 'FPos', 'Const']:
+            st.session_state.qual_params[k] = st.number_input(k, value=qp[k])
 
 # ==============================================================================
-# MODE 1: ĐỊNH LƯỢNG (QUANTITATIVE)
+# MODE 1: ĐỊNH LƯỢNG (4PL)
 # ==============================================================================
-if app_mode == "1. Định lượng (Quantitative)":
+if app_mode == "1. Định lượng (Immuno 4PL)":
     st.title("🧪 Định lượng (4PL Recalibration)")
     
-    col_in, col_out = st.columns([1, 1.5])
-    
-    with col_in:
-        st.subheader("1. Recalibration")
+    col1, col2 = st.columns([1, 1.5])
+    with col1:
+        st.subheader("1. Nhập Calibrator")
         c1, c2 = st.columns(2)
         with c1:
-            t1 = st.number_input("Target 1:", value=42.1)
-            s1 = st.number_input("Signal 1:", value=583722.0)
+            t1 = st.number_input("Target 1", value=42.1)
+            s1 = st.number_input("Signal 1", value=583722.0)
         with c2:
-            t2 = st.number_input("Target 2:", value=372.0)
-            s2 = st.number_input("Signal 2:", value=288320.0)
+            t2 = st.number_input("Target 2", value=372.0)
+            s2 = st.number_input("Signal 2", value=288320.0)
             
         if st.button("🚀 Thực hiện Cal", type="primary"):
             p = st.session_state.master_params
-            ms1 = rod_4pl(t1, **p)
-            ms2 = rod_4pl(t2, **p)
-            
-            if (ms2 - ms1) != 0:
-                slope = (s2 - s1) / (ms2 - ms1)
-                intercept = s1 - slope * ms1
+            m1, m2 = rod_4pl(t1, **p), rod_4pl(t2, **p)
+            if (m2 - m1) != 0:
+                slope = (s2 - s1) / (m2 - m1)
+                intercept = s1 - slope * m1
                 st.session_state.quant_results = {'slope': slope, 'intercept': intercept, 't1': t1, 't2': t2, 's1': s1, 's2': s2}
-            else:
-                st.error("Lỗi tính toán: Mẫu số bằng 0")
+            else: st.error("Lỗi: Không thể tính toán (Mẫu số = 0)")
 
-    with col_out:
+    with col2:
         if st.session_state.quant_results:
             res = st.session_state.quant_results
             p = st.session_state.master_params
             
-            # KPI DISPLAY
+            # KPI
             k1, k2, k3 = st.columns(3)
             k1.metric("Slope", f"{res['slope']:.4f}")
             k2.metric("Intercept", f"{res['intercept']:.0f}")
+            k3.success("PASS") if 0.8 <= res['slope'] <= 1.2 else k3.error("FAIL")
             
-            # Đánh giá PASS/FAIL
-            is_pass = 0.8 <= res['slope'] <= 1.2
-            if is_pass:
-                k3.success("✅ PASS")
-            else:
-                k3.error("❌ FAIL") # Hiển thị Fail nhưng vẫn tiếp tục vẽ bên dưới
-            
-            # --- VẼ BIỂU ĐỒ (CẬP NHẬT RANGE TỰ ĐỘNG) ---
-            st.subheader("2. Biểu đồ Recalibration")
-            
-            # Tự động tìm Min/Max để vẽ cho đẹp
-            # Lấy min của target, chia 5 để có khoảng hở bên trái
-            min_x = min(res['t1'], res['t2']) / 5 
-            if min_x <= 0: min_x = 0.01 # Tránh lỗi log(0)
-            
-            # Lấy max của target, nhân 5 để có khoảng hở bên phải
+            # Chart
+            min_x = min(res['t1'], res['t2']) / 5 if min(res['t1'], res['t2']) > 0 else 0.01
             max_x = max(res['t1'], res['t2']) * 5
-            
-            # Tạo dải X mới dựa trên dữ liệu thật
             x_plot = np.logspace(np.log10(min_x), np.log10(max_x), 200)
-            
-            y_master = [rod_4pl(x, **p) for x in x_plot]
-            y_recal = [y * res['slope'] + res['intercept'] for y in y_master]
+            y_m = [rod_4pl(x, **p) for x in x_plot]
+            y_r = [y * res['slope'] + res['intercept'] for y in y_m]
             
             fig = go.Figure()
-            # Master Curve
-            fig.add_trace(go.Scatter(x=x_plot, y=y_master, mode='lines', name='Master (Gốc)', line=dict(dash='dash', color='gray')))
-            # Actual Curve
-            line_color = 'blue' if is_pass else 'red'
-            line_name = 'Hiện tại (OK)' if is_pass else 'Hiện tại (FAIL)'
-            fig.add_trace(go.Scatter(x=x_plot, y=y_recal, mode='lines', name=line_name, line=dict(color=line_color, width=3)))
-            # Points
-            fig.add_trace(go.Scatter(x=[res['t1'], res['t2']], y=[res['s1'], res['s2']], mode='markers', name='Điểm Cal', marker=dict(size=12, color='black', symbol='x')))
-            
-            fig.update_layout(xaxis_type="log", yaxis_type="log", height=450, title="So sánh Master vs Thực tế")
+            fig.add_trace(go.Scatter(x=x_plot, y=y_m, mode='lines', name='Master', line=dict(dash='dash', color='gray')))
+            fig.add_trace(go.Scatter(x=x_plot, y=y_r, mode='lines', name='Actual', line=dict(color='blue' if 0.8<=res['slope']<=1.2 else 'red')))
+            fig.add_trace(go.Scatter(x=[res['t1'], res['t2']], y=[res['s1'], res['s2']], mode='markers', name='Points', marker=dict(color='black', symbol='x', size=10)))
+            fig.update_layout(xaxis_type="log", yaxis_type="log", height=400, margin=dict(l=0,r=0,t=30,b=0))
             st.plotly_chart(fig, use_container_width=True)
             
-            # --- CÔNG CỤ TÍNH 2 CHIỀU (LUÔN HIỆN) ---
+            # Converter
             st.divider()
-            calc_type = st.radio("Chuyển đổi:", ["Signal ➔ Result", "Result ➔ Signal"], horizontal=True)
-            
-            if calc_type == "Signal ➔ Result":
-                with st.form("calc_s2r"):
-                    in_sig = st.number_input("Nhập Signal mẫu:", value=400000.0)
-                    if st.form_submit_button("Tính Result"):
-                        norm_sig = (in_sig - res['intercept']) / res['slope']
-                        final_conc = inv_rod_4pl(norm_sig, **p)
-                        st.success(f"Kết quả: **{final_conc:.4f}**")
-                        # Vẽ điểm mẫu
-                        fig.add_trace(go.Scatter(x=[final_conc], y=[in_sig], mode='markers', name='Mẫu', marker=dict(size=15, color='orange', symbol='star')))
-                        st.plotly_chart(fig, use_container_width=True, key='chart_s2r')
+            ctype = st.radio("Chuyển đổi:", ["Signal ➔ Result", "Result ➔ Signal"], horizontal=True)
+            if ctype == "Signal ➔ Result":
+                val = st.number_input("Signal:", value=400000.0)
+                if st.button("Tính"):
+                    conc = inv_rod_4pl((val - res['intercept']) / res['slope'], **p)
+                    st.success(f"Kết quả: **{conc:.4f}**")
             else:
-                with st.form("calc_r2s"):
-                    in_conc = st.number_input("Nhập Result mong muốn:", value=100.0)
-                    if st.form_submit_button("Dự đoán Signal"):
-                        master_sig = rod_4pl(in_conc, **p)
-                        pred_sig = master_sig * res['slope'] + res['intercept']
-                        st.info(f"Signal dự kiến: **{pred_sig:,.0f}**")
+                val = st.number_input("Result:", value=100.0)
+                if st.button("Tính"):
+                    sig = rod_4pl(val, **p) * res['slope'] + res['intercept']
+                    st.info(f"Signal: **{sig:,.0f}**")
 
 # ==============================================================================
-# MODE 2: ĐỊNH TÍNH (QUALITATIVE)
+# MODE 2: ĐỊNH TÍNH (CUTOFF)
 # ==============================================================================
-elif app_mode == "2. Định tính (Qualitative)":
+elif app_mode == "2. Định tính (Immuno Cutoff)":
     st.title("⚖️ Định tính (Cutoff & COI)")
     qp = st.session_state.qual_params
     
-    col_in, col_out = st.columns([1, 1.5])
-    
-    with col_in:
-        st.subheader("1. Xác lập Cutoff")
-        sig_neg = st.number_input("Cal 1 (Neg):", value=2000.0)
-        sig_pos = st.number_input("Cal 2 (Pos):", value=50000.0)
-        
+    col1, col2 = st.columns([1, 1.5])
+    with col1:
+        s_neg = st.number_input("Cal Neg", value=2000.0)
+        s_pos = st.number_input("Cal Pos", value=50000.0)
         if st.button("🚀 Tính Cutoff", type="primary"):
             msgs = []
-            is_pass = True
-            # QC Checks
-            if not (qp['MinNeg'] <= sig_neg <= qp['MaxNeg']): is_pass = False; msgs.append(f"Neg ngoài dải ({qp['MinNeg']}-{qp['MaxNeg']})")
-            if not (qp['MinPos'] <= sig_pos <= qp['MaxPos']): is_pass = False; msgs.append(f"Pos ngoài dải ({qp['MinPos']}-{qp['MaxPos']})")
-            if (sig_pos - sig_neg) < qp['MinDiff']: is_pass = False; msgs.append(f"Diff quá nhỏ (<{qp['MinDiff']})")
+            valid = True
+            if not (qp['MinNeg'] <= s_neg <= qp['MaxNeg']): valid=False; msgs.append("Neg ngoài dải")
+            if not (qp['MinPos'] <= s_pos <= qp['MaxPos']): valid=False; msgs.append("Pos ngoài dải")
+            if (s_pos - s_neg) < qp['MinDiff']: valid=False; msgs.append("Diff quá nhỏ")
             
-            cutoff = (sig_neg * qp['FNeg']) + (sig_pos * qp['FPos']) + qp['Const']
-            st.session_state.qual_results = {'cutoff': cutoff, 'is_pass': is_pass, 'msgs': msgs, 'sig_neg': sig_neg, 'sig_pos': sig_pos}
+            cutoff = s_neg * qp['FNeg'] + s_pos * qp['FPos'] + qp['Const']
+            st.session_state.qual_results = {'cutoff': cutoff, 'valid': valid, 'msgs': msgs, 'neg': s_neg, 'pos': s_pos}
 
-    with col_out:
+    with col2:
         if st.session_state.qual_results:
             res = st.session_state.qual_results
-            st.subheader("2. Kết quả & Biểu đồ")
+            if res['valid']: st.success(f"PASS | Cutoff = {res['cutoff']:,.0f}")
+            else: st.error(f"FAIL | {res['cutoff']:,.0f}"); [st.write(m) for m in res['msgs']]
             
-            # Báo cáo Pass/Fail
-            if res['is_pass']:
-                st.success(f"✅ PASSED | Cutoff = {res['cutoff']:,.0f}")
-            else:
-                st.error(f"⛔ FAILED | Cutoff = {res['cutoff']:,.0f} (Invalid)")
-                for m in res['msgs']: st.write(m)
+            fig = go.Figure(data=[
+                go.Bar(x=['Neg', 'Cutoff', 'Pos'], y=[res['neg'], res['cutoff'], res['pos']], marker_color=['green', 'gray', 'blue'])
+            ])
+            st.plotly_chart(fig, use_container_width=True)
             
-            # --- VẼ BIỂU ĐỒ (LUÔN VẼ DÙ FAIL) ---
-            # Để người dùng thấy trực quan tại sao Fail (ví dụ cột Neg quá cao)
-            fig_bar = go.Figure()
-            # Cột Neg
-            color_neg = 'green' if (qp['MinNeg'] <= res['sig_neg'] <= qp['MaxNeg']) else 'red'
-            fig_bar.add_trace(go.Bar(x=['Neg Cal'], y=[res['sig_neg']], marker_color=color_neg, name='Negative'))
-            
-            # Cột Cutoff
-            fig_bar.add_trace(go.Bar(x=['Cutoff'], y=[res['cutoff']], marker_color='gray', name='Cutoff'))
-            
-            # Cột Pos
-            color_pos = 'blue' if (qp['MinPos'] <= res['sig_pos'] <= qp['MaxPos']) else 'red'
-            fig_bar.add_trace(go.Bar(x=['Pos Cal'], y=[res['sig_pos']], marker_color=color_pos, name='Positive'))
-            
-            # Vẽ các đường giới hạn (Min/Max) để dễ so sánh
-            fig_bar.add_hline(y=qp['MaxNeg'], line_dash="dot", annotation_text="Max Neg", line_color="green")
-            fig_bar.add_hline(y=qp['MinPos'], line_dash="dot", annotation_text="Min Pos", line_color="blue")
-            
-            fig_bar.update_layout(title="Trực quan hóa Tín hiệu Cal", height=400)
-            st.plotly_chart(fig_bar, use_container_width=True)
-            
-            # --- CÔNG CỤ TÍNH MẪU (LUÔN HIỆN) ---
             st.divider()
-            q_calc = st.radio("Tính toán:", ["Signal ➔ COI", "COI ➔ Signal"], horizontal=True)
-            
-            if q_calc == "Signal ➔ COI":
-                with st.form("calc_coi"):
-                    in_sig = st.number_input("Signal mẫu:", value=100000.0)
-                    if st.form_submit_button("Tính COI"):
-                        coi = in_sig / res['cutoff']
-                        concl = "DƯƠNG TÍNH" if coi >= 1.0 else "ÂM TÍNH"
-                        st.metric("COI", f"{coi:.2f}", concl)
-                        # Vẽ điểm mẫu
-                        fig_bar.add_trace(go.Scatter(x=['Mẫu'], y=[in_sig], mode='markers', marker=dict(size=15, color='orange', symbol='star')))
-                        st.plotly_chart(fig_bar, use_container_width=True, key='qual_chart_upd')
-            else:
-                with st.form("calc_sig_q"):
-                    in_coi = st.number_input("COI mong muốn:", value=1.0)
-                    if st.form_submit_button("Dự đoán Signal"):
-                        pred_sig = in_coi * res['cutoff']
-                        st.info(f"Signal dự kiến: **{pred_sig:,.0f}**")
+            sig_in = st.number_input("Signal mẫu:", value=100000.0)
+            if st.button("Tính COI"):
+                coi = sig_in / res['cutoff']
+                st.metric("COI", f"{coi:.2f}", "DƯƠNG" if coi>=1 else "ÂM")
 
 # ==============================================================================
-# MODE 3: TROUBLESHOOT (LỊCH SỬ & MÔ PHỎNG)
+# MODE 3: TROUBLESHOOT
 # ==============================================================================
-elif app_mode == "3. Troubleshoot (Lịch sử)":
+elif app_mode == "3. Troubleshoot (Trend Analysis)":
     st.title("📈 Phân tích Xu hướng & Mô phỏng")
-    st.markdown("Theo dõi biến động Slope và đánh giá tác động lên kết quả bệnh nhân.")
     
-    # 1. KHỞI TẠO STATE CHO MODE 3 (Để không bị mất khi bấm nút tính)
-    if 'history_analysis' not in st.session_state:
-        st.session_state.history_analysis = None
-
-    # 2. DỮ LIỆU ĐẦU VÀO
-    df_sample = pd.DataFrame([
-        {"Date": "2023-12-01", "Target 1": 0.592, "Target 2": 19.0, "Signal 1": 4428, "Signal 2": 115877},
-        {"Date": "2023-12-15", "Target 1": 0.592, "Target 2": 19.0, "Signal 1": 7336, "Signal 2": 117647},
-        {"Date": "2023-12-30", "Target 1": 0.592, "Target 2": 19.0, "Signal 1": 3500, "Signal 2": 100000},
-    ])
+    if st.session_state.history_analysis is None: st.session_state.history_analysis = {}
     
-    st.subheader("1. Dữ liệu Lịch sử Cal")
-    # data_editor tự giữ trạng thái nên không lo mất dữ liệu nhập
-    edited_df = st.data_editor(df_sample, num_rows="dynamic", use_container_width=True)
+    df_init = pd.DataFrame([{"Date": "2023-12-01", "T1": 42.1, "T2": 372.0, "S1": 590000, "S2": 295000}])
+    edited = st.data_editor(df_init, num_rows="dynamic", use_container_width=True)
     
-    # 3. NÚT PHÂN TÍCH (Chỉ làm nhiệm vụ TÍNH và LƯU vào State)
-    if st.button("🔍 Phân tích dữ liệu", type="primary"):
+    if st.button("🔍 Phân tích", type="primary"):
         p = st.session_state.master_params
-        analysis_results = []
-        global_min, global_max = 99999, 0
-        
-        for i, row in edited_df.iterrows():
+        res_list = []
+        g_min, g_max = 99999, 0
+        for i, row in edited.iterrows():
             try:
-                date_str = str(row['Date'])
-                t1, t2 = float(row['Target 1']), float(row['Target 2'])
-                s1, s2 = float(row['Signal 1']), float(row['Signal 2'])
-                
-                # Update range vẽ biểu đồ
-                global_min = min(global_min, t1, t2)
-                global_max = max(global_max, t1, t2)
-                
+                t1, t2 = float(row['T1']), float(row['T2'])
+                s1, s2 = float(row['S1']), float(row['S2'])
+                g_min, g_max = min(g_min, t1, t2), max(g_max, t1, t2)
                 m1, m2 = rod_4pl(t1, **p), rod_4pl(t2, **p)
-                
-                if (m2 - m1) != 0:
-                    slope = (s2 - s1) / (m2 - m1)
-                    intercept = s1 - slope * m1
-                    
-                    analysis_results.append({
-                        'Date': date_str, 'Slope': slope, 'Intercept': intercept,
-                        'T1': t1, 'T2': t2, 'S1': s1, 'S2': s2
-                    })
+                if (m2-m1)!=0:
+                    slope = (s2-s1)/(m2-m1)
+                    res_list.append({'Date': row['Date'], 'Slope': slope, 'Int': s1 - slope*m1})
             except: pass
+        st.session_state.history_analysis = {'data': res_list, 'min': g_min, 'max': g_max}
         
-        # LƯU KẾT QUẢ VÀO SESSION STATE (QUAN TRỌNG)
-        if analysis_results:
-            st.session_state.history_analysis = {
-                'results': analysis_results,
-                'min_x': global_min,
-                'max_x': global_max
-            }
-            st.success("Đã phân tích xong! Kéo xuống để xem kết quả.")
-        else:
-            st.error("Không có dữ liệu hợp lệ.")
-
-    # 4. HIỂN THỊ KẾT QUẢ (Luôn hiển thị nếu State đã có dữ liệu)
-    if st.session_state.history_analysis is not None:
+    if 'data' in st.session_state.history_analysis:
         data = st.session_state.history_analysis
-        res_list = data['results']
-        res_df = pd.DataFrame(res_list)
-        p = st.session_state.master_params
+        res_df = pd.DataFrame(data['data'])
         
+        c1, c2 = st.columns(2)
+        with c1:
+            st.caption("Xu hướng Slope")
+            fig = go.Figure()
+            fig.add_hrect(y0=0.8, y1=1.2, fillcolor="green", opacity=0.1, line_width=0)
+            fig.add_trace(go.Scatter(x=res_df['Date'], y=res_df['Slope'], mode='lines+markers'))
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with c2:
+            st.caption("Overlay Curves")
+            x_p = np.logspace(np.log10(data['min']/5), np.log10(data['max']*5), 100)
+            y_m = [rod_4pl(x, **st.session_state.master_params) for x in x_p]
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=x_p, y=y_m, mode='lines', name='Master', line=dict(dash='dash', color='black')))
+            for r in data['data']:
+                y_a = [y * r['Slope'] + r['Int'] for y in y_m]
+                fig.add_trace(go.Scatter(x=x_p, y=y_a, mode='lines', name=str(r['Date']), opacity=0.5))
+            fig.update_layout(xaxis_type="log", yaxis_type="log")
+            st.plotly_chart(fig, use_container_width=True)
+            
         st.divider()
-        
-        # --- A. BIỂU ĐỒ ---
-        col_trend, col_overlay = st.columns(2)
-        with col_trend:
-            st.subheader("A. Xu hướng Slope")
-            fig_trend = go.Figure()
-            fig_trend.add_hrect(y0=0.8, y1=1.2, fillcolor="green", opacity=0.1, line_width=0)
-            fig_trend.add_trace(go.Scatter(x=res_df['Date'], y=res_df['Slope'], mode='lines+markers+text', text=[f"{s:.2f}" for s in res_df['Slope']], textposition="top center", name='Slope'))
-            fig_trend.update_layout(yaxis_title="Slope Factor", height=400)
-            st.plotly_chart(fig_trend, use_container_width=True)
-
-        with col_overlay:
-            st.subheader("B. Overlay Đường cong")
-            fig_overlay = go.Figure()
-            x_start = data['min_x'] / 5 if data['min_x'] > 0 else 0.01
-            x_end = data['max_x'] * 5
-            x_plot = np.logspace(np.log10(x_start), np.log10(x_end), 200)
-            
-            # Master
-            y_m_base = [rod_4pl(x, **p) for x in x_plot]
-            fig_overlay.add_trace(go.Scatter(x=x_plot, y=y_m_base, mode='lines', name='MASTER', line=dict(color='black', dash='dash'), opacity=0.5))
-            
-            # History Curves
-            for r in res_list:
-                y_act = [y * r['Slope'] + r['Intercept'] for y in y_m_base]
-                fig_overlay.add_trace(go.Scatter(x=x_plot, y=y_act, mode='lines', name=f"{r['Date']} (S:{r['Slope']:.2f})"))
-            
-            fig_overlay.update_layout(xaxis_type="log", yaxis_type="log", height=400, xaxis_title="Log Conc", yaxis_title="Log Signal")
-            st.plotly_chart(fig_overlay, use_container_width=True)
-
-        # --- B. MÔ PHỎNG TÁC ĐỘNG (Phần này sẽ KHÔNG bị reset nữa) ---
-        st.divider()
-        st.subheader("C. Mô phỏng & Chuyển đổi")
-        st.markdown("Nhập giá trị để xem sự biến động kết quả qua các ngày.")
-        
-        sim_col1, sim_col2 = st.columns([1, 2])
-        
-        with sim_col1:
-            # Dùng Form để gom nhóm input
-            with st.form("sim_form"):
-                sim_mode = st.radio("Chọn hướng:", ["Signal ➔ Result", "Result ➔ Signal"])
-                sim_val = st.number_input("Nhập giá trị:", value=100000.0 if sim_mode == "Signal ➔ Result" else 5.0)
-                
-                # Nút tính nằm trong form
-                calc_btn = st.form_submit_button("⚡ Tính toán")
-        
-        with sim_col2:
-            if calc_btn: # Khi bấm nút này, code chạy lại nhưng history_analysis vẫn còn trong session_state
-                sim_res_list = []
-                input_lbl = "Signal" if sim_mode == "Signal ➔ Result" else "Result"
-                output_lbl = "Result" if sim_mode == "Signal ➔ Result" else "Signal"
-                
-                for r in res_list:
-                    out_val = np.nan
-                    if sim_mode == "Signal ➔ Result":
-                        norm = (sim_val - r['Intercept']) / r['Slope']
-                        out_val = inv_rod_4pl(norm, **p)
+        st.write("Mô phỏng 2 chiều")
+        with st.form("sim"):
+            way = st.radio("Hướng:", ["Signal ➔ Result", "Result ➔ Signal"])
+            val = st.number_input("Giá trị:", value=100000.0)
+            if st.form_submit_button("Tính"):
+                sim_res = []
+                p = st.session_state.master_params
+                for r in data['data']:
+                    out = np.nan
+                    if way == "Signal ➔ Result":
+                        out = inv_rod_4pl((val - r['Int'])/r['Slope'], **p)
                     else:
-                        m_sig = rod_4pl(sim_val, **p)
-                        out_val = m_sig * r['Slope'] + r['Intercept']
-                    
-                    sim_res_list.append({
-                        "Date": r['Date'],
-                        "Slope": r['Slope'],
-                        output_lbl: out_val
-                    })
+                        out = rod_4pl(val, **p) * r['Slope'] + r['Int']
+                    sim_res.append({'Date': r['Date'], 'Output': out})
                 
-                # Hiển thị kết quả
-                df_sim = pd.DataFrame(sim_res_list)
-                st.dataframe(df_sim.style.format({
-                    "Slope": "{:.4f}",
-                    output_lbl: "{:.4f}" if sim_mode == "Signal ➔ Result" else "{:,.0f}"
-                }), use_container_width=True)
-                
-                # Vẽ biểu đồ biến động
-                if not df_sim[output_lbl].isna().all():
-                    fig_sim = go.Figure()
-                    fig_sim.add_trace(go.Scatter(
-                        x=df_sim['Date'], y=df_sim[output_lbl],
-                        mode='lines+markers+text',
-                        text=[f"{v:.2f}" if sim_mode == "Signal ➔ Result" else f"{v:.0f}" for v in df_sim[output_lbl]],
-                        textposition="top center",
-                        line=dict(color='orange', width=2, dash='dot')
-                    ))
-                    
-                    # Tính CV%
-                    vals = df_sim[output_lbl].dropna()
-                    if len(vals) > 0:
-                        cv = (np.std(vals) / np.mean(vals)) * 100
-                        st.caption(f"Độ biến thiên (CV%): **{cv:.2f}%**")
-                        
-                    fig_sim.update_layout(title=f"Biến động {output_lbl}", height=300)
-                    st.plotly_chart(fig_sim, use_container_width=True)
+                sim_df = pd.DataFrame(sim_res)
+                st.dataframe(sim_df)
+                st.line_chart(sim_df.set_index('Date'))
+
+# ==============================================================================
+# MODE 4: SINH HÓA (PHOTOMETRIC)
+# ==============================================================================
+elif app_mode == "4. Sinh hóa (Photometric)":
+    st.title("⚗️ Sinh hóa (Linear & Line Graph)")
+    
+    chem_type = st.selectbox("Thuật toán:", ["Linear 2-Point", "Line Graph (Multipoint)"])
+    
+    if chem_type == "Linear 2-Point":
+        c1, c2 = st.columns(2)
+        with c1:
+            cb = st.number_input("Conc Std 1 (Cb)", value=0.0)
+            ab = st.number_input("Abs Std 1 (Ab)", value=0.0036, format="%.4f")
+        with c2:
+            cn = st.number_input("Conc Std 2 (Cn)", value=10.8)
+            an = st.number_input("Abs Std 2 (An)", value=0.8739, format="%.4f")
+            
+        if st.button("🚀 Tính K-Factor"):
+            k = calc_k_factor(cn, cb, an, ab)
+            st.session_state.chem_linear_res = {'k': k, 'cb': cb, 'ab': ab, 'cn': cn, 'an': an}
+            
+        if st.session_state.chem_linear_res:
+            res = st.session_state.chem_linear_res
+            st.divider()
+            col_k, col_ref = st.columns(2)
+            col_k.metric("K-Factor", f"{res['k']:.2f}")
+            
+            # So sánh với tham chiếu từ XML (nếu có)
+            if st.session_state.chem_ref_params:
+                ref_k = st.session_state.chem_ref_params.get('k_ref', 0)
+                if ref_k != 0:
+                    diff = ((res['k'] - ref_k)/ref_k)*100
+                    col_ref.metric("Factory K", f"{ref_k:.2f}", f"{diff:.1f}%")
+                    if abs(diff) > 20: st.warning("⚠️ Lệch > 20% so với XML")
+
+            # Biểu đồ
+            x_plt = np.linspace(0, res['cn']*1.5, 50)
+            y_plt = [res['ab'] + (1/res['k'] if res['k']!=0 else 0) * (x - res['cb']) for x in x_plt]
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=x_plt, y=y_plt, mode='lines', name='Linear Fit'))
+            fig.add_trace(go.Scatter(x=[res['cb'], res['cn']], y=[res['ab'], res['an']], mode='markers', marker=dict(color='red', size=10)))
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Tính mẫu
+            with st.form("chem_l_calc"):
+                s_abs = st.number_input("Abs Mẫu:", value=0.5000, format="%.4f")
+                if st.form_submit_button("Tính Nồng độ"):
+                    c_res = calc_linear_conc(s_abs, res['k'], res['ab'], res['cb'])
+                    st.success(f"Kết quả: **{c_res:.2f}**")
+
+    elif chem_type == "Line Graph (Multipoint)":
+        st.write("Nhập bảng Calibrator:")
+        df_pts = pd.DataFrame({"Conc": [0.0, 10.0, 50.0], "Abs": [0.005, 0.050, 0.220]})
+        edt = st.data_editor(df_pts, num_rows="dynamic")
+        
+        if st.button("Lưu dữ liệu"):
+            pts = [{"conc": float(r['Conc']), "abs": float(r['Abs'])} for i,r in edt.iterrows()]
+            st.session_state.chem_multipoint = pts
+            st.success("Đã lưu!")
+            
+        if st.session_state.chem_multipoint:
+            pts = sorted(st.session_state.chem_multipoint, key=lambda x: x['conc'])
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=[p['conc'] for p in pts], y=[p['abs'] for p in pts], mode='lines+markers'))
+            st.plotly_chart(fig, use_container_width=True)
+            
+            s_abs = st.number_input("Abs Mẫu:", value=0.1)
+            if st.button("Tính Line Graph"):
+                res = calc_line_graph(s_abs, pts)
+                st.success(f"Kết quả: **{res:.2f}**")

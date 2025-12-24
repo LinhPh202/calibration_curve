@@ -318,76 +318,96 @@ elif app_mode == "2. Định tính (Immuno Cutoff)":
                 st.metric("COI", f"{coi:.2f}", "DƯƠNG" if coi>=1 else "ÂM")
 
 # ==============================================================================
-# MODE 3: TROUBLESHOOT
+# MODE 3: TROUBLESHOOT & SHAPE ANALYSIS
 # ==============================================================================
 elif app_mode == "3. Troubleshoot (Trend Analysis)":
-    st.title("📈 Phân tích Xu hướng & Mô phỏng")
+    st.title("📈 Phân tích Hình học Đường chuẩn")
+    st.markdown("Đánh giá hình dạng đường cong để tìm nguyên nhân gốc rễ.")
     
-    if st.session_state.history_analysis is None: st.session_state.history_analysis = {}
-    
-    df_init = pd.DataFrame([{"Date": "2023-12-01", "T1": 42.1, "T2": 372.0, "S1": 590000, "S2": 295000}])
-    edited = st.data_editor(df_init, num_rows="dynamic", use_container_width=True)
-    
-    if st.button("🔍 Phân tích", type="primary"):
-        p = st.session_state.master_params
-        res_list = []
-        g_min, g_max = 99999, 0
-        for i, row in edited.iterrows():
-            try:
-                t1, t2 = float(row['T1']), float(row['T2'])
-                s1, s2 = float(row['S1']), float(row['S2'])
-                g_min, g_max = min(g_min, t1, t2), max(g_max, t1, t2)
-                m1, m2 = rod_4pl(t1, **p), rod_4pl(t2, **p)
-                if (m2-m1)!=0:
-                    slope = (s2-s1)/(m2-m1)
-                    res_list.append({'Date': row['Date'], 'Slope': slope, 'Int': s1 - slope*m1})
-            except: pass
-        st.session_state.history_analysis = {'data': res_list, 'min': g_min, 'max': g_max}
+    # 1. NHẬP LIỆU
+    col_in1, col_in2 = st.columns([1, 2])
+    with col_in1:
+        st.subheader("Thông số Cal hiện tại")
+        # Giả lập nhập từ máy hoặc lấy từ Mode 1
+        t1 = st.number_input("Target 1", value=42.1)
+        s1 = st.number_input("Signal 1 (Đo được)", value=583722.0)
+        t2 = st.number_input("Target 2", value=372.0)
+        s2 = st.number_input("Signal 2 (Đo được)", value=288320.0) # Thử đổi số này để test các case
         
-    if 'data' in st.session_state.history_analysis:
-        data = st.session_state.history_analysis
-        res_df = pd.DataFrame(data['data'])
-        
-        c1, c2 = st.columns(2)
-        with c1:
-            st.caption("Xu hướng Slope")
-            fig = go.Figure()
-            fig.add_hrect(y0=0.8, y1=1.2, fillcolor="green", opacity=0.1, line_width=0)
-            fig.add_trace(go.Scatter(x=res_df['Date'], y=res_df['Slope'], mode='lines+markers'))
-            st.plotly_chart(fig, use_container_width=True)
-        
-        with c2:
-            st.caption("Overlay Curves")
-            x_p = np.logspace(np.log10(data['min']/5), np.log10(data['max']*5), 100)
-            y_m = [rod_4pl(x, **st.session_state.master_params) for x in x_p]
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=x_p, y=y_m, mode='lines', name='Master', line=dict(dash='dash', color='black')))
-            for r in data['data']:
-                y_a = [y * r['Slope'] + r['Int'] for y in y_m]
-                fig.add_trace(go.Scatter(x=x_p, y=y_a, mode='lines', name=str(r['Date']), opacity=0.5))
-            fig.update_layout(xaxis_type="log", yaxis_type="log")
-            st.plotly_chart(fig, use_container_width=True)
+    with col_in2:
+        st.subheader("Phân tích Hình dạng (Shape Diagnosis)")
+        if st.button("🔍 Phân tích Hình học", type="primary"):
+            p = st.session_state.master_params
             
-        st.divider()
-        st.write("Mô phỏng 2 chiều")
-        with st.form("sim"):
-            way = st.radio("Hướng:", ["Signal ➔ Result", "Result ➔ Signal"])
-            val = st.number_input("Giá trị:", value=100000.0)
-            if st.form_submit_button("Tính"):
-                sim_res = []
-                p = st.session_state.master_params
-                for r in data['data']:
-                    out = np.nan
-                    if way == "Signal ➔ Result":
-                        out = inv_rod_4pl((val - r['Int'])/r['Slope'], **p)
-                    else:
-                        out = rod_4pl(val, **p) * r['Slope'] + r['Int']
-                    sim_res.append({'Date': r['Date'], 'Output': out})
-                
-                sim_df = pd.DataFrame(sim_res)
-                st.dataframe(sim_df)
-                st.line_chart(sim_df.set_index('Date'))
+            # 1. Tính Tín hiệu Lý thuyết (Master)
+            m1 = rod_4pl(t1, **p)
+            m2 = rod_4pl(t2, **p)
+            
+            # 2. Tính % Lệch tại từng điểm (Deviation)
+            dev1 = ((s1 - m1) / m1) * 100
+            dev2 = ((s2 - m2) / m2) * 100
+            
+            # 3. Tính Slope (Factor)
+            slope = (s2 - s1) / (m2 - m1) if (m2 - m1) != 0 else 0
+            
+            # --- LOGIC CHẨN ĐOÁN HÌNH DẠNG ---
+            shape_type = "Bình thường"
+            color = "green"
+            advice = "Hệ thống ổn định."
+            
+            # Case 1: Cắt chéo (Nguy hiểm) - Lệch ngược chiều nhau
+            # Ví dụ: Cal 1 tăng 10% nhưng Cal 2 lại giảm 10%
+            if (dev1 * dev2 < 0) and (abs(dev1 - dev2) > 10): 
+                shape_type = "❌ MÉO MÓ / CẮT CHÉO (Distortion)"
+                color = "red"
+                advice = "Cảnh báo: Đường thực tế cắt chéo Master. Có thể do thao tác sai (bọt khí, lẫn lộn mẫu) ở một trong hai lọ Cal."
+            
+            # Case 2: Tịnh tiến (Song song) - Lệch cùng chiều và xấp xỉ nhau
+            # Ví dụ: Cả 2 đều tăng khoảng 20%
+            elif abs(dev1 - dev2) < 5 and abs(dev1) > 10:
+                shape_type = "⚠️ TỊNH TIẾN (Parallel Shift)"
+                color = "orange"
+                advice = "Cảnh báo: Tín hiệu bị nâng/hạ nền đều nhau. Kiểm tra: Nước rửa, Cuvette, Nhiễm bẩn hệ thống."
+            
+            # Case 3: Xoay trục (Rotation) - Cal 1 chuẩn, Cal 2 lệch nhiều
+            # Ví dụ: Cal 1 lệch 2%, Cal 2 lệch 15%
+            elif abs(dev1) < 5 and abs(dev2) > 10:
+                if slope < 1:
+                    shape_type = "📉 XOAY XUỐNG (Drift Down)"
+                    color = "blue"
+                    advice = "Hiện tượng già hóa thuốc thử hoặc bóng đèn. Chấp nhận được nếu Slope > 0.8."
+                else:
+                    shape_type = "📈 XOAY LÊN (Drift Up)"
+                    color = "orange"
+                    advice = "Thuốc thử bị cô đặc (bay hơi) hoặc nhiệt độ ủ cao."
 
+            # HIỂN THỊ KẾT QUẢ
+            st.markdown(f"### Kết luận: :{color}[{shape_type}]")
+            st.info(f"💡 **Gợi ý:** {advice}")
+            
+            st.write(f"- Độ lệch tại Cal 1: **{dev1:+.1f}%**")
+            st.write(f"- Độ lệch tại Cal 2: **{dev2:+.1f}%**")
+            st.write(f"- Slope tổng thể: **{slope:.4f}**")
+            
+            # --- VẼ BIỂU ĐỒ ---
+            st.divider()
+            x_plot = np.logspace(np.log10(min(t1,t2)/5), np.log10(max(t1,t2)*5), 200)
+            y_master = [rod_4pl(x, **p) for x in x_plot]
+            
+            # Tính đường thực tế
+            intercept = s1 - slope * m1
+            y_actual = [y * slope + intercept for y in y_master]
+            
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=x_plot, y=y_master, mode='lines', name='Master Curve', line=dict(color='gray', dash='dash')))
+            fig.add_trace(go.Scatter(x=x_plot, y=y_actual, mode='lines', name='Actual Curve', line=dict(color=color, width=3)))
+            
+            # Vẽ mũi tên minh họa độ lệch
+            fig.add_trace(go.Scatter(x=[t1, t1], y=[m1, s1], mode='lines+markers', name='Lệch Cal 1', line=dict(color='black', width=1, dash='dot')))
+            fig.add_trace(go.Scatter(x=[t2, t2], y=[m2, s2], mode='lines+markers', name='Lệch Cal 2', line=dict(color='black', width=1, dash='dot')))
+            
+            fig.update_layout(title="Trực quan hóa biến dạng hình học", xaxis_type="log", yaxis_type="log", height=450)
+            st.plotly_chart(fig, use_container_width=True)
 # ==============================================================================
 # MODE 4: SINH HÓA (PHOTOMETRIC)
 # ==============================================================================

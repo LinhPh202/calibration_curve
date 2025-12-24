@@ -301,32 +301,146 @@ elif app_mode == "2. Định tính (Qualitative)":
                         st.info(f"Signal dự kiến: **{pred_sig:,.0f}**")
 
 # ==============================================================================
-# MODE 3: TROUBLESHOOT
+# MODE 3: TROUBLESHOOT (LỊCH SỬ & VISUALIZATION)
 # ==============================================================================
 elif app_mode == "3. Troubleshoot (Lịch sử)":
-    st.title("📈 Mode 3: Trend Analysis")
-    st.info("Phân tích xu hướng Slope để dự đoán lỗi.")
+    st.title("📈 Phân tích Xu hướng & So sánh Đường chuẩn")
+    st.markdown("Theo dõi biến động Slope và trực quan hóa sự thay đổi hình dạng đường cong theo thời gian.")
     
+    # Dữ liệu mẫu khởi tạo
     df_sample = pd.DataFrame([
-        {"Date": "2023-12-01", "Target 1": 42.1, "Target 2": 372.0, "Signal 1": 590000, "Signal 2": 295000},
-        {"Date": "2023-12-15", "Target 1": 42.1, "Target 2": 372.0, "Signal 1": 583602, "Signal 2": 289073},
+        {"Date": "2023-12-01", "Target 1": 0.592, "Target 2": 19.0, "Signal 1": 4428, "Signal 2": 115877},
+        {"Date": "2023-12-15", "Target 1": 0.592, "Target 2": 19.0, "Signal 1": 7336, "Signal 2": 117647},
     ])
+    
+    st.subheader("1. Dữ liệu Lịch sử Cal")
     edited_df = st.data_editor(df_sample, num_rows="dynamic", use_container_width=True)
     
-    if st.button("🔍 Phân tích"):
+    if st.button("🔍 Phân tích & Vẽ đồ thị", type="primary"):
         p = st.session_state.master_params
-        res_list = []
+        
+        # Danh sách kết quả để vẽ
+        analysis_results = []
+        
+        # Biến để xác định Min/Max cho trục X của biểu đồ (Tránh bị vẽ ngắn/cụt)
+        global_min_target = 99999
+        global_max_target = 0
+        
+        # --- BƯỚC 1: TÍNH TOÁN SLOPE CHO TỪNG DÒNG ---
         for i, row in edited_df.iterrows():
             try:
+                date_str = str(row['Date'])
                 t1, t2 = float(row['Target 1']), float(row['Target 2'])
                 s1, s2 = float(row['Signal 1']), float(row['Signal 2'])
-                m1, m2 = rod_4pl(t1, **p), rod_4pl(t2, **p)
-                slope = (s2 - s1) / (m2 - m1)
-                res_list.append({'Date': row['Date'], 'Slope': slope})
-            except: pass
+                
+                # Cập nhật min/max global để vẽ biểu đồ cho đẹp
+                global_min_target = min(global_min_target, t1, t2)
+                global_max_target = max(global_max_target, t1, t2)
+                
+                # Tính Master Signal
+                m1 = rod_4pl(t1, **p)
+                m2 = rod_4pl(t2, **p)
+                
+                # Tính Slope & Intercept cho ngày hôm đó
+                if (m2 - m1) != 0:
+                    slope = (s2 - s1) / (m2 - m1)
+                    intercept = s1 - slope * m1
+                    
+                    analysis_results.append({
+                        'Date': date_str,
+                        'Slope': slope,
+                        'Intercept': intercept,
+                        'T1': t1, 'T2': t2,
+                        'S1': s1, 'S2': s2
+                    })
+            except Exception as e:
+                pass # Bỏ qua dòng lỗi
             
-        rdf = pd.DataFrame(res_list)
-        fig = go.Figure()
-        fig.add_hrect(y0=0.8, y1=1.2, fillcolor="green", opacity=0.1, line_width=0, annotation_text="Safe Zone")
-        fig.add_trace(go.Scatter(x=rdf['Date'], y=rdf['Slope'], mode='lines+markers', name='Slope'))
-        st.plotly_chart(fig, use_container_width=True)
+        # Chuyển thành DataFrame kết quả
+        res_df = pd.DataFrame(analysis_results)
+        
+        if res_df.empty:
+            st.error("Không có dữ liệu hợp lệ để phân tích.")
+        else:
+            st.divider()
+            
+            # --- BƯỚC 2: VẼ 2 BIỂU ĐỒ SONG SONG ---
+            col_trend, col_overlay = st.columns(2)
+            
+            # --- BIỂU ĐỒ 1: XU HƯỚNG SLOPE (Trend Chart) ---
+            with col_trend:
+                st.subheader("A. Xu hướng Slope")
+                st.caption("Theo dõi độ suy hao tín hiệu (Chuẩn = 1.0)")
+                
+                fig_trend = go.Figure()
+                # Vùng an toàn
+                fig_trend.add_hrect(y0=0.8, y1=1.2, fillcolor="green", opacity=0.1, line_width=0, annotation_text="Safe Zone")
+                # Đường Slope
+                fig_trend.add_trace(go.Scatter(
+                    x=res_df['Date'], y=res_df['Slope'],
+                    mode='lines+markers+text',
+                    text=[f"{s:.2f}" for s in res_df['Slope']],
+                    textposition="top center",
+                    name='Slope', line=dict(color='blue', width=2)
+                ))
+                fig_trend.update_layout(yaxis_title="Slope Factor", height=450)
+                st.plotly_chart(fig_trend, use_container_width=True)
+
+            # --- BIỂU ĐỒ 2: CHỒNG LỚP ĐƯỜNG CONG (Overlay Chart) ---
+            with col_overlay:
+                st.subheader("B. So sánh các Đường Cal")
+                st.caption("Master (Nét đứt) vs Các lần chạy thực tế")
+                
+                fig_overlay = go.Figure()
+                
+                # 1. Tạo trục X mượt (Range động dựa trên min/max data)
+                # Mở rộng biên trái phải một chút (chia 2, nhân 2)
+                x_start = global_min_target / 5 if global_min_target > 0 else 0.01
+                x_end = global_max_target * 5
+                x_plot = np.logspace(np.log10(x_start), np.log10(x_end), 200)
+                
+                # 2. Vẽ Master Curve (Gốc) - Nằm dưới cùng
+                y_master_base = [rod_4pl(x, **p) for x in x_plot]
+                fig_overlay.add_trace(go.Scatter(
+                    x=x_plot, y=y_master_base,
+                    mode='lines', name='MASTER GỐC',
+                    line=dict(color='black', dash='dash', width=2),
+                    opacity=0.6
+                ))
+                
+                # 3. Vẽ từng đường Cal lịch sử
+                # Dùng phổ màu hoặc opacity để phân biệt
+                for idx, row in res_df.iterrows():
+                    # Tính đường cong của ngày hôm đó: y = y_master * slope + intercept
+                    y_actual_curve = [y * row['Slope'] + row['Intercept'] for y in y_master_base]
+                    
+                    # Tên hiển thị trong chú thích
+                    label = f"{row['Date']} (Slope: {row['Slope']:.2f})"
+                    
+                    # Vẽ đường cong
+                    fig_overlay.add_trace(go.Scatter(
+                        x=x_plot, y=y_actual_curve,
+                        mode='lines', name=label
+                    ))
+                    
+                    # Vẽ điểm Cal thực tế của ngày đó (để kiểm chứng độ khớp)
+                    fig_overlay.add_trace(go.Scatter(
+                        x=[row['T1'], row['T2']], y=[row['S1'], row['S2']],
+                        mode='markers', showlegend=False,
+                        marker=dict(size=8, symbol='circle')
+                    ))
+                
+                fig_overlay.update_layout(
+                    xaxis_type="log", yaxis_type="log",
+                    xaxis_title="Nồng độ (Log)", yaxis_title="Tín hiệu (Log)",
+                    height=450,
+                    legend=dict(orientation="h", y=-0.2) # Đưa chú thích xuống dưới cho đỡ rối
+                )
+                st.plotly_chart(fig_overlay, use_container_width=True)
+            
+            # --- BƯỚC 3: BẢNG CHI TIẾT ---
+            with st.expander("Xem bảng chi tiết tham số tính toán"):
+                st.dataframe(res_df.style.format({
+                    "Slope": "{:.4f}", "Intercept": "{:.2f}",
+                    "S1": "{:.0f}", "S2": "{:.0f}"
+                }))
